@@ -1,0 +1,3 @@
+boto3
+ldap3
+logger

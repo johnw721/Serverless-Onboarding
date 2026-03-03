@@ -1,0 +1,6 @@
+{
+  "body": "token=xxx&team_id=T123&command=/onboard&text=John Doe, Senior DevOps Engineer, Platform Team",
+  "headers": {
+    "Content-Type": "application/x-www-form-urlencoded"
+  }
+}
