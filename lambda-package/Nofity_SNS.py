@@ -5,7 +5,7 @@ from botocore.exceptions import ClientError
 topic_arn = os.environ.get("SNS_TOPIC_ARN")
 
 
-def notify_sns(topic_arn, message, subject):
+def lambda_handler(topic_arn, message, subject):
     sns_client = boto3.client("sns")
     try:
         response = sns_client.publish(
