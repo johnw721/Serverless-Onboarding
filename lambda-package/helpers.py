@@ -1,7 +1,7 @@
 import boto3
 import os
 import time
-import logger
+from logger import logger
 
 
 ALL_EMPLOYEES_GROUP = "All Employees"
