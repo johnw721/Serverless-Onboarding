@@ -1,6 +1,7 @@
 import boto3
 import os
 import time
+import json
 from logger import logger
 
 
@@ -37,7 +38,21 @@ def validate_employee_data(employee_data):
     missing_fields = [field for field in required_fields if field not in employee_data]
     if missing_fields:
         raise ValueError(f"Missing required employee data fields: {', '.join(missing_fields)}")
-    return True
+        return {
+            statusCode: 400,
+            body: json.dumps({"error": f"Missing required employee data fields: {', '.join(missing_fields)}"})
+        }
+    elif employee_data["role"] not in ROLE_TO_DEPARTMENT_MAP:
+        raise ValueError(f"Invalid role specified: {employee_data['role']}. Valid roles are: {', '.join(ROLE_TO_DEPARTMENT_MAP.keys())}")
+        return {
+            statusCode: 400,
+            body: json.dumps({"error": f"Invalid role specified: {employee_data['role']}. Valid roles are: {', '.join(ROLE_TO_DEPARTMENT_MAP.keys())}"})
+        }
+    else:
+        return {
+            statusCode: 200,
+            body: json.dumps({"message": "Employee data is valid."})
+        }
 
 
 
