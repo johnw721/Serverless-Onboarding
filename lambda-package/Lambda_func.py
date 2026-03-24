@@ -35,7 +35,7 @@ base_dn = os.getenv("BASE_DN")  # Assuming the base DN is set as an environment 
 
 
 ### Verify response from Slack and extract necessary information for user creation
-def lambda_handler(event, context):
+def lambda_handler(event, _):
 
 
 ### Define LDAP server and connection parameters
@@ -43,17 +43,18 @@ def lambda_handler(event, context):
     ldap_user = secretsmanager.get_secret_value("ldap_username").get("SecretString")
     ldap_password = secretsmanager.get_secret_value("ldap_password").get("SecretString")
 
-### Lazy Loading of Secret
-
-
 # Parse the incoming event body to extract user information, handling both JSON and URL-encoded formats
     raw_body = event["body"]
     decoded_body = urllib.parse.unquote_plus(raw_body)
+    # outputs something like this: username=jdoe&name=John+Doe&Role=Software+Engineer&Department=Engineering
     try:
         user_info = json.loads(decoded_body)
+    # outputs something like this: {'username': 'jdoe', 'name': 'John Doe', 'Role': 'Software Engineer', 'Department': 'Engineering'}
     except json.JSONDecodeError:
         parsed = urllib.parse.parse_qs(decoded_body)
+    # outputs something like this: {'username': ['jdoe'], 'name': ['John Doe'], 'Role': ['Software Engineer'], 'Department': ['Engineering']}
         user_info = {k: v[0] for k, v in parsed.items()}
+    # outputs this final dictionary: {'username': 'jdoe', 'name': 'John Doe', 'Role': 'Software Engineer', 'Department': 'Engineering'}
 
 # Now safe to validate
     # Create a new user in Active Directory using the LDAP connection
@@ -74,7 +75,7 @@ def lambda_handler(event, context):
         })
         # Add user to appropriate groups based on their role
         groups_to_add = ROLE_TO_GROUPS_MAP.get(user_info["Role"], [])
-        for group in groups_to_add:
+        for _ in groups_to_add:
             conn.modify(f"CN={ALL_EMPLOYEES_GROUP},{base_dn}", {'member': [(ldap3.MODIFY_ADD, [f"CN={user_info['username']},{base_dn}"])]})
         # Return a success response if the user was created successfully
 
@@ -94,10 +95,14 @@ def lambda_handler(event, context):
             )
         except ClientError as e:
             print(f"Failed to invoke notification lambda: {e}")
-    except Exception:
+        return {
+            "statusCode": 200,
+            "body": json.dumps({"message": f"User {user_info['username']} onboarded successfully."})
+        }
+    except Exception as e:
         log_onboarding_request(user_info, status="Failed")
-    try:
-        notify_sns_lambda.invoke(
+        try:
+            notify_sns_lambda.invoke(
                 FunctionName= f"{os.getenv('NOTIFY_SNS_LAMBDA_NAME')}",  # Assuming the name of the SNS notification lambda function is set as an environment variable
                 InvocationType='Event',  # Asynchronous invocation
                 Payload=json.dumps({
@@ -106,10 +111,10 @@ def lambda_handler(event, context):
                     "subject": "New Employee Onboarding Failure"
                 })
             )
-        response = {
-            "statusCode": 200,
-            "body": json.dumps({"message": f"User {user_info['username']} onboarded successfully."})
+        except ClientError as notify_error:
+            print(f"Failed to invoke notification lambda: {notify_error}")
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"message": f"Failed to onboard user. Error: {str(e)}"})
         }
-    except ClientError as e:
-        print(f"Failed to invoke notification lambda: {e}")
     
