@@ -19,7 +19,7 @@ An automated employee onboarding system that uses Claude (via AWS Bedrock) to pr
 | **AWS Lambda – offboarding_function** | Disables AD account, revokes group membership, logs activity |
 | **AWS Lambda – notify_sns_function** | Decoupled SNS publisher, invoked asynchronously |
 | **Claude 3 Haiku (AWS Bedrock)** | Parses NL requests, assigns AD groups, writes notifications |
-| **AWS Managed Microsoft AD** | Target directory; users and groups created/disabled via LDAP |
+| **AWS Simple AD** | Target directory; users and groups created/disabled via LDAP |
 | **Microsoft Entra ID (optional)** | Synced via Graph API after AD provisioning/offboarding |
 | **SSM Parameter Store** | Stores the confidence threshold; adjustable without redeployment |
 | **Secrets Manager** | Stores LDAP and Azure credentials securely |
@@ -74,9 +74,13 @@ LangChain was considered but ruled out. The three Claude calls in this project �
 
 The SNS notification is decoupled into its own Lambda (`notify_sns_function`) invoked asynchronously (`InvocationType=Event`). This means a transient SNS failure never blocks or retries the main onboarding flow, and each function has a single, testable responsibility.
 
-### Why AWS Managed Microsoft AD over EC2-based AD?
+### Why AWS Simple AD over EC2-based AD or Managed Microsoft AD?
 
-Higher availability (99.9% SLA), automated patching, and no Windows Server maintenance. Trade-off is cost (~$100–150/month), which is acceptable for an enterprise context and negligible in a dev/demo environment with the directory sized as "Small."
+Higher availability than self-managed, automated patching, and no Windows Server maintenance — the same operational benefits as AWS Managed Microsoft AD, at roughly a third of the cost (~$36–40/month for the Small tier vs. ~$87–140/month for Managed Microsoft AD Standard/Enterprise).
+
+Simple AD is Samba 4-based and lacks some Microsoft-specific features (trust relationships with on-premises AD, MFA integration, PowerShell AD module support). None of those features are exercised here — all three LDAP operations in this system (user creation, group membership modification, account disable) work identically on Simple AD. The savings are real; the trade-off isn't.
+
+The mock LDAP layer (`USE_MOCK_LDAP=true`) remains in place for CI and demos, so the full Claude pipeline runs at zero directory cost in any environment where real AD provisioning isn't needed.
 
 ### Confidence thresholds (onboarding and offboarding)
 
@@ -276,7 +280,7 @@ Update the badge URLs at the top of this file by replacing `<your-org>/<your-rep
 - **API Gateway throttling** — burst limit of 10 req/s and sustained rate of 5 req/s protect downstream Bedrock and LDAP from runaway callers even with a valid key
 - **Confidence gating** — ambiguous requests are flagged for human review rather than auto-provisioned
 - **Audit trail** — every onboarding attempt (success, failure, or pending review) is written to DynamoDB with a timestamp
-- **DLQ on notification Lambda** — failed async invocations of `notify_sns_function` (after Lambda's built-in retries) are captured in an SQS dead-letter queue, ensuring no notification loss goes undetected
+- **DLQ + CloudWatch alarm on notification Lambda** — failed async invocations of `notify_sns_function` (after Lambda's built-in retries) are captured in an SQS dead-letter queue; a CloudWatch alarm fires within 60 seconds if any message lands there, alerting the IT SNS topic automatically
 
 ---
 
@@ -310,7 +314,7 @@ Assuming 20 onboardings/month: **~$900/month saved in IT labor**, with a payback
 - ✅ **Offboarding** — full mirror flow: account disable, group removal, Entra ID deprovision, audit log
 - ✅ **Microsoft Entra ID sync** — Graph API provisioning and deprovisioning for Microsoft 365 access
 - ✅ **Security best practices** — Secrets Manager, VPC isolation, least-privilege IAM (resource-specific ARNs throughout), LDAP injection prevention, cryptographically random temp passwords, API Gateway throttling
-- ✅ **Resilient notification path** — `notify_sns_function` invoked asynchronously with an SQS DLQ capturing any failures after Lambda's built-in retries
+- ✅ **Resilient notification path** — `notify_sns_function` invoked asynchronously; SQS DLQ captures failures after Lambda's built-in retries; CloudWatch alarm fires within 60 s and re-alerts via SNS
 - ✅ **Infrastructure as code** — fully reproducible Terraform deployment with S3 remote state
-- ✅ **Observability** — CloudWatch Logs + DynamoDB audit trail + DLQ alarm surface
+- ✅ **Observability** — CloudWatch Logs + DynamoDB audit trail + DLQ alarm with SNS alerting
 - ✅ **Test coverage** — 65 tests (unit + moto-backed integration); all mocked, zero AWS spend in CI

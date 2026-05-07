@@ -555,6 +555,31 @@ resource "aws_sqs_queue" "notify_dlq" {
   }
 }
 
+### Alert when any message lands in the DLQ — indicates notify_sns_function
+### failed all retries and a notification was lost. Fires within 1 minute.
+resource "aws_cloudwatch_metric_alarm" "notify_dlq_alarm" {
+  alarm_name          = "notify-sns-dlq-messages"
+  alarm_description   = "notify_sns_function exhausted all retries — one or more notifications were not delivered. Check the DLQ and CloudWatch Logs."
+  namespace           = "AWS/SQS"
+  metric_name         = "ApproximateNumberOfMessagesVisible"
+  dimensions = {
+    QueueName = aws_sqs_queue.notify_dlq.name
+  }
+  statistic           = "Sum"
+  period              = 60
+  evaluation_periods  = 1
+  threshold           = 0
+  comparison_operator = "GreaterThanThreshold"
+  treat_missing_data  = "notBreaching"
+
+  alarm_actions = [aws_sns_topic.notification_topic.arn]
+  ok_actions    = [aws_sns_topic.notification_topic.arn]
+
+  tags = {
+    Project = "ad-lambda"
+  }
+}
+
 
 ### ============================================================
 ### SNS — Notification Topic
@@ -600,7 +625,11 @@ resource "aws_directory_service_directory" "ad_directory" {
   name     = "business.abc.com"
   password = aws_secretsmanager_secret_version.directory_admin_password_version.secret_string
   size     = "Small"
-  type     = "MicrosoftAD"
+  # Simple AD (Samba 4) costs ~$36-40/month vs ~$87-140/month for Managed Microsoft AD.
+  # All LDAP operations used here (user create, group modify, account disable) work
+  # identically on Simple AD. Switch to "MicrosoftAD" only if trust relationships or
+  # MFA integration are needed.
+  type     = "SimpleAD"
 
   vpc_settings {
     vpc_id     = aws_vpc.main.id
@@ -636,6 +665,11 @@ output "ad_dns_name" {
 }
 
 output "notify_dlq_arn" {
-  description = "ARN of the DLQ for failed notify_sns_function invocations. Monitor with CloudWatch or set up an alarm."
+  description = "ARN of the DLQ for failed notify_sns_function invocations."
   value       = aws_sqs_queue.notify_dlq.arn
+}
+
+output "notify_dlq_alarm_name" {
+  description = "CloudWatch alarm that fires when any message lands in the DLQ."
+  value       = aws_cloudwatch_metric_alarm.notify_dlq_alarm.alarm_name
 }
