@@ -1,9 +1,49 @@
-# Python virtual environment
+# ── Python ────────────────────────────────────────────────────
 .venv/
-
-# Python cache
-__pycache__/
+**/__pycache__/
 *.pyc
-
-# Environment variables
+*.pyo
+*.pyd
 .env
+
+# pytest artifacts (stray cache dirs created on permission-restricted filesystems)
+pytest-cache-files-*/
+.pytest_cache/
+
+# ── Terraform ─────────────────────────────────────────────────
+# State files contain resource IDs and may contain secret values
+/terraform/terraform.tfstate
+/terraform/terraform.tfstate.backup
+/terraform/.terraform/
+/terraform/.terraform.lock.hcl
+
+# Generated Lambda deployment artifact
+/terraform/lambda_function.zip
+
+# Terraform run logs
+/terraform/apply.log
+/terraform/terraform_apply_output.txt
+
+# Local variable overrides (may contain secrets)
+*.tfvars
+*.tfvars.json
+
+# ── Lambda package – pip-installed dependencies ───────────────
+# These are installed into lambda-package/ by the Terraform
+# null_resource before zipping. Don't commit them.
+lambda-package/*.dist-info/
+lambda-package/*.egg-info/
+lambda-package/bin/
+lambda-package/boto3/
+lambda-package/botocore/
+lambda-package/ldap3/
+lambda-package/pyasn1/
+lambda-package/jmespath/
+lambda-package/s3transfer/
+lambda-package/six*
+lambda-package/urllib3/
+lambda-package/dateutil/
+lambda-package/python_dateutil*
+
+# ── Project-specific ──────────────────────────────────────────
+/terraform/LEARNING_LESSONS.md

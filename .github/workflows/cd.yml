@@ -1,0 +1,135 @@
+name: CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write   # allows the plan step to post a PR comment
+
+env:
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  AWS_DEFAULT_REGION: us-west-2
+  TF_VAR_directory_admin_password: ${{ secrets.DIRECTORY_ADMIN_PASSWORD }}
+  TF_VAR_onboarding_api_key: ${{ secrets.ONBOARDING_API_KEY }}
+  # Flip to "true" to run the pipeline end-to-end without a real AD directory.
+  # Remove or set to "false" once real LDAP credentials are in Secrets Manager.
+  TF_VAR_use_mock_ldap: "true"
+
+jobs:
+  # ── Gate: tests must pass before any Terraform work runs ──────────────────
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+      - name: Install test dependencies
+        run: pip install boto3 ldap3 pytest
+      - name: Run tests
+        run: python -m pytest tests/ -v -p no:cacheprovider
+
+  # ── Plan: runs on every PR to main ────────────────────────────────────────
+  plan:
+    name: Terraform Plan
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~> 1.5"
+
+      # Install Lambda dependencies for Linux x86_64 so the zip matches the
+      # Lambda execution environment regardless of the developer's local OS.
+      - name: Install Lambda dependencies (Linux x86_64)
+        run: |
+          pip install -r lambda-package/requirements.txt \
+            -t lambda-package/ \
+            --platform manylinux2014_x86_64 \
+            --only-binary=:all: \
+            --quiet
+
+      - name: Terraform Init
+        working-directory: terraform
+        run: terraform init -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" -backend-config="region=us-west-2"
+
+      - name: Terraform Validate
+        working-directory: terraform
+        run: terraform validate
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: terraform
+        run: terraform plan -no-color 2>&1 | tee plan_output.txt
+        continue-on-error: true
+
+      # Post the plan as a PR comment so reviewers can see what will change
+      - name: Post plan to PR
+        uses: actions/github-script@v7
+        if: github.event_name == 'pull_request'
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('terraform/plan_output.txt', 'utf8');
+            const truncated = plan.length > 60000
+              ? plan.slice(0, 60000) + '\n\n... (truncated)'
+              : plan;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## Terraform Plan\n\`\`\`\n${truncated}\n\`\`\``,
+            });
+
+      - name: Fail if plan errored
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
+
+  # ── Apply: runs only on push to main (after PR is merged) ─────────────────
+  apply:
+    name: Terraform Apply
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    # Serialize applies so concurrent merges don't race
+    concurrency:
+      group: terraform-apply
+      cancel-in-progress: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~> 1.5"
+
+      - name: Install Lambda dependencies (Linux x86_64)
+        run: |
+          pip install -r lambda-package/requirements.txt \
+            -t lambda-package/ \
+            --platform manylinux2014_x86_64 \
+            --only-binary=:all: \
+            --quiet
+
+      - name: Terraform Init
+        working-directory: terraform
+        run: terraform init -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" -backend-config="region=us-west-2"
+
+      - name: Terraform Apply
+        working-directory: terraform
+        run: terraform apply -auto-approve

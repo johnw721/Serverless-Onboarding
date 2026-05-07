@@ -1,8 +1,11 @@
 import boto3
 import os
+import re
 import time
 import json
-from logger import logger
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 ALL_EMPLOYEES_GROUP = "All Employees"
@@ -33,41 +36,51 @@ ROLE_TO_GROUPS_MAP = {
     "Operations Manager": ["Operations", ALL_EMPLOYEES_GROUP],
 }
 
+# Audit log TTL: records older than this are automatically deleted by DynamoDB
+_TTL_SECONDS = 365 * 24 * 60 * 60  # 1 year
+
+
+def sanitize_dn_value(value: str) -> str:
+    """
+    Validate a value before it is interpolated into an LDAP Distinguished Name.
+    Allows only alphanumeric characters, dots, hyphens, and underscores.
+    Raises ValueError for anything else to prevent DN injection.
+    """
+    if not re.match(r'^[a-zA-Z0-9._-]+$', value):
+        raise ValueError(
+            f"Value '{value}' contains characters that are not permitted in an LDAP DN. "
+            "Only alphanumeric characters, dots, hyphens, and underscores are allowed."
+        )
+    return value
+
+
 def validate_employee_data(employee_data):
-    required_fields = ["id", "name", "role", "department"]
-    missing_fields = [field for field in required_fields if field not in employee_data]
+    """
+    Validate that all required fields are present and non-null.
+    Role is not checked against the hardcoded map — Claude handles novel titles.
+    """
+    required_fields = ["username", "name", "Role", "Department"]
+    missing_fields = [
+        field for field in required_fields
+        if not employee_data.get(field)
+    ]
     if missing_fields:
         raise ValueError(f"Missing required employee data fields: {', '.join(missing_fields)}")
-        return {
-            statusCode: 400,
-            body: json.dumps({"error": f"Missing required employee data fields: {', '.join(missing_fields)}"})
-        }
-    elif employee_data["role"] not in ROLE_TO_DEPARTMENT_MAP:
-        raise ValueError(f"Invalid role specified: {employee_data['role']}. Valid roles are: {', '.join(ROLE_TO_DEPARTMENT_MAP.keys())}")
-        return {
-            statusCode: 400,
-            body: json.dumps({"error": f"Invalid role specified: {employee_data['role']}. Valid roles are: {', '.join(ROLE_TO_DEPARTMENT_MAP.keys())}"})
-        }
-    else:
-        return {
-            statusCode: 200,
-            body: json.dumps({"message": "Employee data is valid."})
-        }
-
 
 
 def log_onboarding_request(employee_data, status):
     dynamodb = boto3.resource("dynamodb")
-    table_name = dynamodb.Table(os.environ.get("DYNAMODB_TABLE_NAME"))
-    table = dynamodb.Table(table_name)
+    table = dynamodb.Table(os.environ.get("DYNAMODB_TABLE_NAME"))
     try:
         table.put_item(
             Item={
-                "request_id": employee_data["id"],
+                "request_id": employee_data["username"],
                 "employee_name": employee_data["name"],
                 "timestamp": int(time.time()),
-                "status": status
+                "status": status,
+                "ttl": int(time.time()) + _TTL_SECONDS,
             }
         )
     except Exception as e:
-        raise logger.error(f"Error logging onboarding request: {str(e)}")
+        logger.error(f"Error logging onboarding request: {str(e)}")
+        raise
