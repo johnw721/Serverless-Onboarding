@@ -26,14 +26,18 @@ jobs:
     name: Unit Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: "pip"
       - name: Install test dependencies
-        run: pip install boto3 ldap3 pytest
+        run: pip install boto3 ldap3 pytest "moto[dynamodb,secretsmanager,ssm,lambda,iam]"
       - name: Run tests
+        env:
+          AWS_EC2_METADATA_DISABLED: "true"
+          PYTHONDONTWRITEBYTECODE: "1"
+          PYTHONPATH: lambda-package
         run: python -m pytest tests/ -v -p no:cacheprovider
 
   # ── Plan: runs on every PR to main ────────────────────────────────────────
@@ -44,7 +48,7 @@ jobs:
     if: github.event_name == 'pull_request'
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v3
@@ -111,7 +115,7 @@ jobs:
       cancel-in-progress: false
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@v3

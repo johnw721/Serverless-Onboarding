@@ -294,8 +294,6 @@ Assuming 20 onboardings/month: **~$900/month saved in IT labor**, with a payback
 ## Potential Extensions
 
 - **Approval workflow** — Step Functions state machine for manager sign-off before provisioning
-- **Azure AD sync** — Extend provisioning to Entra ID for Microsoft 365 access
-- **Offboarding** — Mirror flow that disables accounts, revokes group membership, and logs activity
 - **Self-service portal** — React frontend for HR to submit and track requests
 - **Access pattern learning** — Fine-tune group recommendations based on historical provisioning data
 
@@ -305,8 +303,11 @@ Assuming 20 onboardings/month: **~$900/month saved in IT labor**, with a payback
 
 - ✅ **Serverless architecture** — event-driven, scales to zero, pay-per-use
 - ✅ **AI integration** — Claude via Bedrock for NL understanding, not just rules matching
-- ✅ **Human-in-the-loop design** — confidence gating prevents silent misprovisioning
-- ✅ **Identity management** — LDAP-based Active Directory automation
-- ✅ **Security best practices** — Secrets Manager, VPC isolation, least-privilege IAM
-- ✅ **Infrastructure as code** — fully reproducible Terraform deployment
+- ✅ **Human-in-the-loop design** — dual confidence gating (0.8 onboarding / 0.95 offboarding) prevents silent misprovisioning on both flows
+- ✅ **Identity management** — LDAP-based Active Directory automation with exponential-backoff retry
+- ✅ **Offboarding** — full mirror flow: account disable, group removal, Entra ID deprovision, audit log
+- ✅ **Microsoft Entra ID sync** — Graph API provisioning and deprovisioning for Microsoft 365 access
+- ✅ **Security best practices** — Secrets Manager, VPC isolation, least-privilege IAM, LDAP injection prevention, cryptographically random temp passwords
+- ✅ **Infrastructure as code** — fully reproducible Terraform deployment with S3 remote state
 - ✅ **Observability** — CloudWatch Logs + DynamoDB audit trail
+- ✅ **Test coverage** — 55 unit tests + moto-backed integration tests; all mocked, zero AWS spend in CI

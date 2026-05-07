@@ -44,8 +44,59 @@ group_base_dn = os.getenv("GROUP_BASE_DN", base_dn)
 
 USE_MOCK_LDAP = os.getenv("USE_MOCK_LDAP", "false").lower() == "true"
 
+# LDAP retry settings — tune via env vars without redeploying
+_LDAP_MAX_ATTEMPTS = int(os.getenv("LDAP_MAX_ATTEMPTS", "3"))
+_LDAP_BACKOFF_BASE = float(os.getenv("LDAP_BACKOFF_BASE", "1.0"))
+
 # userAccountControl value for a disabled AD account
 _AD_ACCOUNT_DISABLED = 514
+
+
+def _ldap_connect(ldap_server_addr: str, ldap_user: str, ldap_password: str):
+    """
+    Establish and bind an LDAP connection with exponential-backoff retry.
+
+    Retries up to _LDAP_MAX_ATTEMPTS times on connection-level failures.
+    Authentication errors are not retried — propagated immediately.
+    Returns a bound ldap3 Connection object.
+    """
+    import time as _time
+
+    last_exc = None
+    for attempt in range(1, _LDAP_MAX_ATTEMPTS + 1):
+        try:
+            server = Server(ldap_server_addr, get_info=ALL)
+            conn = Connection(
+                server,
+                user=ldap_user,
+                password=ldap_password,
+                client_strategy="SYNC",
+                use_ssl=True,
+            )
+            conn.bind()
+            if attempt > 1:
+                logger.info("LDAP connection succeeded on attempt %d", attempt)
+            return conn
+        except Exception as e:
+            last_exc = e
+            err_lower = str(e).lower()
+            if "invalid credentials" in err_lower or "unwillingtoperform" in err_lower:
+                logger.error("LDAP authentication error (not retrying): %s", e)
+                raise
+            if attempt < _LDAP_MAX_ATTEMPTS:
+                wait = _LDAP_BACKOFF_BASE * (2 ** (attempt - 1))
+                logger.warning(
+                    "LDAP connection attempt %d/%d failed, retrying in %.1fs: %s",
+                    attempt, _LDAP_MAX_ATTEMPTS, wait, e,
+                )
+                _time.sleep(wait)
+            else:
+                logger.error(
+                    "LDAP connection failed after %d attempts: %s",
+                    _LDAP_MAX_ATTEMPTS, e,
+                )
+
+    raise last_exc
 
 
 def _extract_request(event) -> str:
@@ -120,16 +171,7 @@ def _offboard_real_ldap(username: str) -> dict:
     Returns {"disabled": bool, "groups_removed": list[str], "groups_failed": list[str]}
     """
     ldap_server_addr, ldap_user, ldap_password = _fetch_ldap_credentials()
-
-    server = Server(ldap_server_addr, get_info=ALL)
-    conn = Connection(
-        server,
-        user=ldap_user,
-        password=ldap_password,
-        client_strategy="SYNC",
-        use_ssl=True,
-    )
-    conn.bind()
+    conn = _ldap_connect(ldap_server_addr, ldap_user, ldap_password)
 
     user_dn = f"CN={username},{base_dn}"
 

@@ -39,6 +39,10 @@ USE_MOCK_LDAP = os.getenv("USE_MOCK_LDAP", "false").lower() == "true"
 
 from azure_sync import sync_to_entra  # noqa: E402 — imported after env var is read
 
+# LDAP retry settings — tune via env vars without redeploying
+_LDAP_MAX_ATTEMPTS = int(os.getenv("LDAP_MAX_ATTEMPTS", "3"))
+_LDAP_BACKOFF_BASE = float(os.getenv("LDAP_BACKOFF_BASE", "1.0"))
+
 
 def _fetch_ldap_credentials():
     ldap_server = secretsmanager.get_secret_value(SecretId="ldap_server_address").get("SecretString")
@@ -73,6 +77,57 @@ def _send_sns_notification(subject, message):
         logger.error(f"Failed to invoke notification Lambda: {e}")
 
 
+def _ldap_connect(ldap_server_addr: str, ldap_user: str, ldap_password: str):
+    """
+    Establish and bind an LDAP connection with exponential-backoff retry.
+
+    Retries up to _LDAP_MAX_ATTEMPTS times on connection-level failures
+    (network unreachable, timeout, etc.). Authentication errors are not
+    retried — a wrong password will fail immediately on every attempt so
+    we propagate the exception without sleeping.
+
+    Returns a bound ldap3 Connection object.
+    """
+    import time as _time
+
+    last_exc = None
+    for attempt in range(1, _LDAP_MAX_ATTEMPTS + 1):
+        try:
+            server = Server(ldap_server_addr, get_info=ALL)
+            conn = Connection(
+                server,
+                user=ldap_user,
+                password=ldap_password,
+                client_strategy="SYNC",
+                use_ssl=True,
+            )
+            conn.bind()
+            if attempt > 1:
+                logger.info("LDAP connection succeeded on attempt %d", attempt)
+            return conn
+        except Exception as e:
+            last_exc = e
+            # Don't retry auth errors — wrong password won't fix itself
+            err_lower = str(e).lower()
+            if "invalid credentials" in err_lower or "unwillingtoperform" in err_lower:
+                logger.error("LDAP authentication error (not retrying): %s", e)
+                raise
+            if attempt < _LDAP_MAX_ATTEMPTS:
+                wait = _LDAP_BACKOFF_BASE * (2 ** (attempt - 1))
+                logger.warning(
+                    "LDAP connection attempt %d/%d failed, retrying in %.1fs: %s",
+                    attempt, _LDAP_MAX_ATTEMPTS, wait, e,
+                )
+                _time.sleep(wait)
+            else:
+                logger.error(
+                    "LDAP connection failed after %d attempts: %s",
+                    _LDAP_MAX_ATTEMPTS, e,
+                )
+
+    raise last_exc
+
+
 def _provision_real_ldap(user_info: dict, groups: list) -> dict:
     """
     Create the AD user account and add them to each group.
@@ -85,16 +140,7 @@ def _provision_real_ldap(user_info: dict, groups: list) -> dict:
         {"added": list[str], "failed": list[str]}
     """
     ldap_server_addr, ldap_user, ldap_password = _fetch_ldap_credentials()
-
-    server = Server(ldap_server_addr, get_info=ALL)
-    conn = Connection(
-        server,
-        user=ldap_user,
-        password=ldap_password,
-        client_strategy="SYNC",
-        use_ssl=True,
-    )
-    conn.bind()
+    conn = _ldap_connect(ldap_server_addr, ldap_user, ldap_password)
 
     # User creation is fatal -- propagate on failure
     conn.add(
