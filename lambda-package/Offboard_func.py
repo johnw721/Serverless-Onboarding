@@ -178,13 +178,19 @@ def _offboard_real_ldap(username: str) -> dict:
     # Disable account — fatal if it fails (account doesn't exist or wrong DN)
     conn.modify(user_dn, {"userAccountControl": [(MODIFY_REPLACE, [_AD_ACCOUNT_DISABLED])]})
 
-    # Find all groups the user is a member of
+    # Find all groups the user is a member of.
+    # conn.response is a list of raw dicts; filter to searchResEntry to skip
+    # referrals and the searchResDone control entry.
     conn.search(
         search_base=group_base_dn,
         search_filter=f"(&(objectClass=group)(member={user_dn}))",
         attributes=["cn"],
     )
-    groups = [entry["attributes"]["cn"] for entry in conn.entries]
+    groups = [
+        e["attributes"]["cn"]
+        for e in conn.response
+        if e.get("type") == "searchResEntry"
+    ]
 
     removed, failed = [], []
     for group in groups:

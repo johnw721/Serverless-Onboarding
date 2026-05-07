@@ -271,10 +271,12 @@ Update the badge URLs at the top of this file by replacing `<your-org>/<your-rep
 
 - **Secrets Manager** — LDAP credentials never appear in environment variables or code
 - **VPC isolation** — both Lambda functions run inside the VPC; all AWS service calls go through Interface Endpoints and never leave the AWS backbone
-- **Least-privilege IAM** — Lambda role is scoped to the specific actions it needs; Secrets Manager and DynamoDB access is resource-specific, while Bedrock and Lambda invoke use wildcards scoped to the account
+- **Least-privilege IAM** — Lambda role is scoped to specific resource ARNs throughout: Secrets Manager, DynamoDB, SNS, SSM, the notify Lambda function, and the exact Claude 3 Haiku model ARN in Bedrock
 - **API key authentication** — all requests authenticated via a Lambda REQUEST authorizer before reaching the onboarding pipeline
+- **API Gateway throttling** — burst limit of 10 req/s and sustained rate of 5 req/s protect downstream Bedrock and LDAP from runaway callers even with a valid key
 - **Confidence gating** — ambiguous requests are flagged for human review rather than auto-provisioned
 - **Audit trail** — every onboarding attempt (success, failure, or pending review) is written to DynamoDB with a timestamp
+- **DLQ on notification Lambda** — failed async invocations of `notify_sns_function` (after Lambda's built-in retries) are captured in an SQS dead-letter queue, ensuring no notification loss goes undetected
 
 ---
 
@@ -307,7 +309,8 @@ Assuming 20 onboardings/month: **~$900/month saved in IT labor**, with a payback
 - ✅ **Identity management** — LDAP-based Active Directory automation with exponential-backoff retry
 - ✅ **Offboarding** — full mirror flow: account disable, group removal, Entra ID deprovision, audit log
 - ✅ **Microsoft Entra ID sync** — Graph API provisioning and deprovisioning for Microsoft 365 access
-- ✅ **Security best practices** — Secrets Manager, VPC isolation, least-privilege IAM, LDAP injection prevention, cryptographically random temp passwords
+- ✅ **Security best practices** — Secrets Manager, VPC isolation, least-privilege IAM (resource-specific ARNs throughout), LDAP injection prevention, cryptographically random temp passwords, API Gateway throttling
+- ✅ **Resilient notification path** — `notify_sns_function` invoked asynchronously with an SQS DLQ capturing any failures after Lambda's built-in retries
 - ✅ **Infrastructure as code** — fully reproducible Terraform deployment with S3 remote state
-- ✅ **Observability** — CloudWatch Logs + DynamoDB audit trail
-- ✅ **Test coverage** — 55 unit tests + moto-backed integration tests; all mocked, zero AWS spend in CI
+- ✅ **Observability** — CloudWatch Logs + DynamoDB audit trail + DLQ alarm surface
+- ✅ **Test coverage** — 65 tests (unit + moto-backed integration); all mocked, zero AWS spend in CI

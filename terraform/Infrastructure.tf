@@ -1,3 +1,7 @@
+### Resolve the AWS account ID at plan time — used to scope IAM resources
+### to specific ARNs without hardcoding the account number.
+data "aws_caller_identity" "current" {}
+
 ### ============================================================
 ### VPC & Networking
 ### ============================================================
@@ -111,6 +115,16 @@ resource "aws_vpc_endpoint" "bedrock_endpoint" {
   private_dns_enabled = true
 }
 
+### Needed for notify_sns_function to write to its DLQ from within the VPC
+resource "aws_vpc_endpoint" "sqs_endpoint" {
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.us-west-2.sqs"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = [aws_subnet.foo.id]
+  security_group_ids  = [aws_security_group.vpc_endpoint_sg.id]
+  private_dns_enabled = true
+}
+
 
 ### ============================================================
 ### IAM — Lambda Execution Role
@@ -180,17 +194,28 @@ resource "aws_iam_policy" "lambda_policy" {
         Resource = [aws_sns_topic.notification_topic.arn]
       },
       {
-        Sid      = "InvokeNotifySNSLambda"
-        Effect   = "Allow"
-        Action   = ["lambda:InvokeFunction"]
-        # Wildcard avoids circular dependency; tighten with ARN after first apply
-        Resource = ["arn:aws:lambda:us-west-2:*:function:notify_sns_function"]
+        Sid    = "InvokeNotifySNSLambda"
+        Effect = "Allow"
+        Action = ["lambda:InvokeFunction"]
+        Resource = [
+          "arn:aws:lambda:us-west-2:${data.aws_caller_identity.current.account_id}:function:notify_sns_function"
+        ]
       },
       {
-        Sid      = "BedrockInvokeClaude"
+        Sid    = "BedrockInvokeClaude"
+        Effect = "Allow"
+        Action = ["bedrock:InvokeModel"]
+        # Scoped to Claude 3 Haiku — the only model this system calls.
+        # Update if switching to a different model.
+        Resource = [
+          "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-3-haiku-20240307-v1:0"
+        ]
+      },
+      {
+        Sid      = "SQSSendDLQ"
         Effect   = "Allow"
-        Action   = ["bedrock:InvokeModel"]
-        Resource = ["*"]
+        Action   = ["sqs:SendMessage"]
+        Resource = [aws_sqs_queue.notify_dlq.arn]
       },
       {
         Sid      = "SSMReadConfidenceThresholds"
@@ -335,6 +360,12 @@ resource "aws_lambda_function" "notify_sns_function" {
   source_code_hash = data.archive_file.lambda_zip.output_base64sha256
   timeout          = 30
 
+  # Failed async invocations (after Lambda's 2 built-in retries) are sent
+  # here so no notification loss goes undetected.
+  dead_letter_config {
+    target_arn = aws_sqs_queue.notify_dlq.arn
+  }
+
   vpc_config {
     subnet_ids         = [aws_subnet.foo.id, aws_subnet.bar.id]
     security_group_ids = [aws_security_group.lambda_sg.id]
@@ -476,6 +507,14 @@ resource "aws_apigatewayv2_stage" "default" {
   api_id      = aws_apigatewayv2_api.onboarding_api.id
   name        = "$default"
   auto_deploy = true
+
+  # Throttle all routes: burst of 10 req/s, sustained 5 req/s.
+  # Protects downstream Bedrock and LDAP from runaway callers even with a
+  # valid API key. Tune via a new stage deployment — no Lambda redeployment needed.
+  default_route_settings {
+    throttling_burst_limit = 10
+    throttling_rate_limit  = 5
+  }
 }
 
 
@@ -496,6 +535,23 @@ resource "aws_dynamodb_table" "onboarding_request_table" {
   ttl {
     attribute_name = "ttl"
     enabled        = true
+  }
+}
+
+
+### ============================================================
+### SQS — Dead-Letter Queue for notify_sns_function
+### ============================================================
+
+### Captures failed async invocations of notify_sns_function so no
+### notification loss goes undetected. Lambda retries twice on failure,
+### then writes the event payload here. Retained for 14 days.
+resource "aws_sqs_queue" "notify_dlq" {
+  name                      = "notify-sns-dlq"
+  message_retention_seconds = 1209600 # 14 days
+
+  tags = {
+    Project = "ad-lambda"
   }
 }
 
@@ -577,4 +633,9 @@ output "sns_topic_arn" {
 output "ad_dns_name" {
   description = "DNS name of the Active Directory — use as ldap_server_address secret value"
   value       = aws_directory_service_directory.ad_directory.name
+}
+
+output "notify_dlq_arn" {
+  description = "ARN of the DLQ for failed notify_sns_function invocations. Monitor with CloudWatch or set up an alarm."
+  value       = aws_sqs_queue.notify_dlq.arn
 }
