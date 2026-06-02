@@ -18,7 +18,8 @@ def lambda_handler(event, context):
         return {"isAuthorized": False}
 
     headers = event.get("headers", {})
-    provided_key = headers.get("x-api-key", "")
+    query_params = event.get("queryStringParameters") or {}
+    provided_key = headers.get("x-api-key") or query_params.get("x-api-key", "")
 
     authorized = provided_key == _API_KEY
     if not authorized:

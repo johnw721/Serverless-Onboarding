@@ -203,9 +203,9 @@ def _generate_temp_password() -> str:
     common Active Directory complexity requirements:
     at least one uppercase, lowercase, digit, and special character.
 
-    Uses secrets.token_urlsafe for the random body — not deterministic,
-    not derivable. The caller includes it in the IT notification so admins
-    can distribute it to the new hire through a secure out-of-band channel.
+    Uses secrets.choice over a safe alphabet for each character — not
+    deterministic, not derivable. The caller includes it in the IT
+    notification so admins can distribute it through a secure out-of-band channel.
     """
     import secrets
     import string

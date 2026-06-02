@@ -23,7 +23,7 @@ An automated employee onboarding system that uses Claude (via AWS Bedrock) to pr
 | **Microsoft Entra ID (optional)** | Synced via Graph API after AD provisioning/offboarding |
 | **SSM Parameter Store** | Stores the confidence threshold; adjustable without redeployment |
 | **Secrets Manager** | Stores LDAP and Azure credentials securely |
-| **DynamoDB** | Audit log of every onboarding attempt and its outcome |
+| **DynamoDB** | Append-only audit log of every onboarding/offboarding event with full context |
 | **SNS** | Delivers notifications to IT team and hiring managers |
 | **Terraform** | Provisions all infrastructure as code |
 
@@ -74,6 +74,8 @@ LangChain was considered but ruled out. The three Claude calls in this project �
 
 The SNS notification is decoupled into its own Lambda (`notify_sns_function`) invoked asynchronously (`InvocationType=Event`). This means a transient SNS failure never blocks or retries the main onboarding flow, and each function has a single, testable responsibility.
 
+The SNS client in `notify_sns_function` is initialized at module level rather than inside the handler, so warm Lambda invocations reuse the existing client and skip the boto3 initialization overhead entirely.
+
 ### Why AWS Simple AD over EC2-based AD or Managed Microsoft AD?
 
 Higher availability than self-managed, automated patching, and no Windows Server maintenance — the same operational benefits as AWS Managed Microsoft AD, at roughly a third of the cost (~$36–40/month for the Small tier vs. ~$87–140/month for Managed Microsoft AD Standard/Enterprise).
@@ -114,6 +116,25 @@ aws ssm put-parameter \
 ```
 
 The next Lambda invocation after the 5-minute TTL expires will pick up the new value.
+
+### Audit log schema (DynamoDB)
+
+Every event — onboarding, offboarding, pending review, or failure — writes one immutable record. The partition key is a UUID so that multiple events for the same employee are all preserved; using the username as a key caused later writes to silently overwrite earlier ones.
+
+| Attribute | Type | Notes |
+|---|---|---|
+| `request_id` | String (UUID) | Partition key — unique per event |
+| `username` | String | AD username (e.g. `jdoe`) |
+| `employee_name` | String | Full name |
+| `role` | String | Job title as extracted by Claude |
+| `department` | String | Department as extracted or inferred by Claude |
+| `groups` | List | AD groups assigned (onboarding) or removed (offboarding) |
+| `confidence` | String | Claude's confidence score for the action (stored as decimal string) |
+| `timestamp` | Number | Unix epoch of the event |
+| `status` | String | `Success`, `Partial`, `Failed`, `Pending Review`, `Offboarded`, `Offboard Pending Review`, `Offboard Failed` |
+| `ttl` | Number | Unix epoch; DynamoDB auto-deletes records after 1 year |
+
+`groups` and `confidence` are omitted from records where they are not meaningful (e.g. a parse failure before Claude reached the group-assignment step).
 
 ---
 
@@ -279,7 +300,7 @@ Update the badge URLs at the top of this file by replacing `<your-org>/<your-rep
 - **API key authentication** — all requests authenticated via a Lambda REQUEST authorizer before reaching the onboarding pipeline
 - **API Gateway throttling** — burst limit of 10 req/s and sustained rate of 5 req/s protect downstream Bedrock and LDAP from runaway callers even with a valid key
 - **Confidence gating** — ambiguous requests are flagged for human review rather than auto-provisioned
-- **Audit trail** — every onboarding attempt (success, failure, or pending review) is written to DynamoDB with a timestamp
+- **Audit trail** — every event (success, failure, pending review, offboarding) writes an immutable DynamoDB record with a UUID partition key; records include role, department, groups assigned/removed, and Claude's confidence score for full post-incident traceability
 - **DLQ + CloudWatch alarm on notification Lambda** — failed async invocations of `notify_sns_function` (after Lambda's built-in retries) are captured in an SQS dead-letter queue; a CloudWatch alarm fires within 60 seconds if any message lands there, alerting the IT SNS topic automatically
 
 ---
@@ -316,5 +337,5 @@ Assuming 20 onboardings/month: **~$900/month saved in IT labor**, with a payback
 - ✅ **Security best practices** — Secrets Manager, VPC isolation, least-privilege IAM (resource-specific ARNs throughout), LDAP injection prevention, cryptographically random temp passwords, API Gateway throttling
 - ✅ **Resilient notification path** — `notify_sns_function` invoked asynchronously; SQS DLQ captures failures after Lambda's built-in retries; CloudWatch alarm fires within 60 s and re-alerts via SNS
 - ✅ **Infrastructure as code** — fully reproducible Terraform deployment with S3 remote state
-- ✅ **Observability** — CloudWatch Logs + DynamoDB audit trail + DLQ alarm with SNS alerting
+- ✅ **Observability** — CloudWatch Logs + DynamoDB audit trail (UUID-keyed, append-only; stores role, department, groups, and confidence per event) + DLQ alarm with SNS alerting
 - ✅ **Test coverage** — 65 tests (unit + moto-backed integration); all mocked, zero AWS spend in CI

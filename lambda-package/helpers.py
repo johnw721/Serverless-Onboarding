@@ -2,6 +2,7 @@ import boto3
 import os
 import re
 import time
+import uuid
 import json
 import logging
 
@@ -68,19 +69,44 @@ def validate_employee_data(employee_data):
         raise ValueError(f"Missing required employee data fields: {', '.join(missing_fields)}")
 
 
-def log_onboarding_request(employee_data, status):
+def log_onboarding_request(
+    employee_data: dict,
+    status: str,
+    groups: list | None = None,
+    confidence: float | None = None,
+) -> None:
+    """
+    Append an immutable audit record to DynamoDB.
+
+    Each call writes a new item with a UUID partition key so that multiple
+    events for the same employee (onboard, offboard, re-onboard, pending
+    review) are all preserved. Using the username as the key caused silent
+    overwrites — a UUID guarantees append-only behaviour.
+
+    Optional fields:
+        groups      - list of AD groups assigned/removed (omitted if None)
+        confidence  - Claude's confidence score for the action (omitted if None)
+    """
+    now = int(time.time())
+    item: dict = {
+        "request_id": str(uuid.uuid4()),
+        "username": employee_data["username"],
+        "employee_name": employee_data.get("name", ""),
+        "role": employee_data.get("Role", ""),
+        "department": employee_data.get("Department", ""),
+        "timestamp": now,
+        "status": status,
+        "ttl": now + _TTL_SECONDS,
+    }
+    if groups is not None:
+        item["groups"] = groups
+    if confidence is not None:
+        item["confidence"] = str(round(confidence, 4))  # DynamoDB has no float type; store as string
+
     dynamodb = boto3.resource("dynamodb")
     table = dynamodb.Table(os.environ.get("DYNAMODB_TABLE_NAME"))
     try:
-        table.put_item(
-            Item={
-                "request_id": employee_data["username"],
-                "employee_name": employee_data["name"],
-                "timestamp": int(time.time()),
-                "status": status,
-                "ttl": int(time.time()) + _TTL_SECONDS,
-            }
-        )
+        table.put_item(Item=item)
     except Exception as e:
         logger.error(f"Error logging onboarding request: {str(e)}")
         raise

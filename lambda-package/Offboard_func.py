@@ -256,7 +256,7 @@ def lambda_handler(event, context):
     # than onboarding. Ambiguous requests are held for manual review.
     confidence = target.get("confidence", 0.0)
     if confidence < get_offboard_confidence_threshold():
-        log_onboarding_request(user_info, status="Offboard Pending Review")
+        log_onboarding_request(user_info, status="Offboard Pending Review", confidence=confidence)
         _send_sns_notification(
             subject="Employee Offboarding Pending Manual Review",
             message=(
@@ -286,7 +286,7 @@ def lambda_handler(event, context):
         result = offboard(username)
     except Exception as e:
         logger.error("LDAP offboarding failed for %s: %s", username, e)
-        log_onboarding_request(user_info, status="Offboard Failed")
+        log_onboarding_request(user_info, status="Offboard Failed", confidence=confidence)
         _send_sns_notification(
             subject="Employee Offboarding Failure",
             message=(
@@ -306,7 +306,7 @@ def lambda_handler(event, context):
 
     # Step 7: Log and notify
     status = "Offboarded" if not result["groups_failed"] else "Offboarded (Partial)"
-    log_onboarding_request(user_info, status=status)
+    log_onboarding_request(user_info, status=status, groups=result["groups_removed"], confidence=confidence)
 
     notification = generate_notification(user_info, result["groups_removed"], status)
     _send_sns_notification(subject=f"Employee Offboarding {status}", message=notification)

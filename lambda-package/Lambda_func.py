@@ -238,7 +238,7 @@ def lambda_handler(event, context):
 
     # Step 5a: Low confidence -- flag for manual review, return 202
     if confidence < get_confidence_threshold():
-        log_onboarding_request(user_info, status="Pending Review")
+        log_onboarding_request(user_info, status="Pending Review", groups=groups, confidence=confidence)
         _send_sns_notification(
             subject="Employee Onboarding Pending Manual Review",
             message=(
@@ -285,7 +285,7 @@ def lambda_handler(event, context):
             )
 
         status = "Partial" if failed else "Success"
-        log_onboarding_request(user_info, status=status)
+        log_onboarding_request(user_info, status=status, groups=added, confidence=confidence)
 
         notification_message = generate_notification(user_info, added, status)
         if temp_password:
@@ -313,7 +313,7 @@ def lambda_handler(event, context):
 
     except Exception as e:
         logger.error(f"Onboarding failed for {user_info.get('username', 'unknown')}: {e}")
-        log_onboarding_request(user_info, status="Failed")
+        log_onboarding_request(user_info, status="Failed", groups=groups, confidence=confidence)
 
         notification_message = generate_notification(user_info, groups, "Failed")
         _send_sns_notification(

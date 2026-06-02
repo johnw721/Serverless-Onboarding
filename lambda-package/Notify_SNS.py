@@ -5,15 +5,18 @@ from botocore.exceptions import ClientError
 
 logger = logging.getLogger(__name__)
 
+# Initialized at module level so the client is reused across warm invocations
+# rather than re-created on every call.
+_sns_client = boto3.client("sns")
+
 
 def lambda_handler(event, context):
     topic_arn = event.get("topic_arn", os.environ.get("SNS_TOPIC_ARN"))
     message = event.get("message", "")
     subject = event.get("subject", "Notification")
 
-    sns_client = boto3.client("sns")
     try:
-        response = sns_client.publish(
+        response = _sns_client.publish(
             TopicArn=topic_arn,
             Message=message,
             Subject=subject
