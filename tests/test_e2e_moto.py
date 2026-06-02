@@ -27,6 +27,7 @@ import json
 import os
 import sys
 import unittest
+import uuid
 import zipfile
 import io
 from unittest.mock import patch, MagicMock
@@ -191,7 +192,9 @@ class TestOnboardingE2E(MotoE2EBase):
         items = self.table.scan()["Items"]
         self.assertEqual(len(items), 1)
         record = items[0]
-        self.assertEqual(record["request_id"], "schen")
+        # request_id is now an append-only UUID, not the username
+        uuid.UUID(record["request_id"])
+        self.assertEqual(record["username"], "schen")
         self.assertEqual(record["status"], "Success")
         self.assertIn("timestamp", record)
 
@@ -325,7 +328,8 @@ class TestOffboardingE2E(MotoE2EBase):
 
         items = self.table.scan()["Items"]
         self.assertEqual(len(items), 1)
-        self.assertEqual(items[0]["request_id"], "schen")
+        uuid.UUID(items[0]["request_id"])
+        self.assertEqual(items[0]["username"], "schen")
         self.assertEqual(items[0]["status"], "Offboarded")
 
     @patch("Offboard_func._parse_offboard_request", return_value={

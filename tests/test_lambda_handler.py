@@ -87,6 +87,8 @@ class TestLambdaHandlerE2E(unittest.TestCase):
             {"username": "asmith", "name": "Alice Smith",
              "Role": "Software Engineer", "Department": "Engineering"},
             status="Success",
+            groups=["Engineering", "All Employees"],
+            confidence=0.95,
         )
         self.mock_notify_lambda.invoke.assert_called_once()
 
@@ -123,6 +125,8 @@ class TestLambdaHandlerE2E(unittest.TestCase):
             {"username": "bwilson", "name": "Bob Wilson",
              "Role": "Innovation Catalyst", "Department": "Strategy"},
             status="Pending Review",
+            groups=["All Employees"],
+            confidence=0.45,
         )
         # SNS alert must be fired; LDAP must NOT be touched
         self.mock_notify_lambda.invoke.assert_called_once()
