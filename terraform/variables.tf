@@ -1,3 +1,9 @@
+variable "aws_region" {
+  description = "AWS region resources are deployed into. Must be us-west-2 unless you also update the hardcoded availability zones, VPC endpoint service names, and IAM ARNs in Infrastructure.tf."
+  type        = string
+  default     = "us-west-2"
+}
+
 variable "vpc_cidr_block" {
   description = "CIDR block for the VPC"
   type        = string

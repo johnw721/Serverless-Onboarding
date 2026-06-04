@@ -1,5 +1,14 @@
 # Sample API Requests
 
+> **Note — asynchronous response model.** The `/onboard` route is now fronted by
+> `slack_dispatch_function`, which returns an immediate acknowledgement
+> (`{"text": "Working on it…"}`, HTTP 200) and processes the request
+> asynchronously. The **final** result (success, manual-review, or validation
+> error) is delivered to Slack via `slack_notifier_function`, not in the
+> synchronous HTTP body. The "Expected response" blocks below describe the
+> *worker's* outcome — i.e. what you'll see in Slack / CloudWatch Logs — except
+> the 403 case, which the authorizer still returns synchronously before dispatch.
+
 Replace `<API_ENDPOINT>` with the `api_endpoint` Terraform output and `<YOUR_API_KEY>` with the value you passed for `var.onboarding_api_key`.
 
 ---

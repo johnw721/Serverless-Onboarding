@@ -218,9 +218,9 @@ resource "aws_iam_policy" "lambda_policy" {
         Resource = [aws_sqs_queue.notify_dlq.arn]
       },
       {
-        Sid      = "SSMReadConfidenceThresholds"
-        Effect   = "Allow"
-        Action   = ["ssm:GetParameter"]
+        Sid    = "SSMReadConfidenceThresholds"
+        Effect = "Allow"
+        Action = ["ssm:GetParameter"]
         # Covers both /ad-lambda/confidence-threshold and
         # /ad-lambda/offboard-confidence-threshold
         Resource = [
@@ -327,13 +327,13 @@ resource "aws_lambda_function" "onboarding_function" {
 
   environment {
     variables = {
-      DOMAIN                 = aws_directory_service_directory.ad_directory.name
-      BASE_DN                = "DC=business,DC=abc,DC=com"
-      DYNAMODB_TABLE_NAME    = aws_dynamodb_table.onboarding_request_table.name
-      SNS_TOPIC_ARN          = aws_sns_topic.notification_topic.arn
-      NOTIFY_SNS_LAMBDA_NAME          = aws_lambda_function.notify_sns_function.function_name
-      USE_MOCK_LDAP                   = var.use_mock_ldap
-      AZURE_SYNC_ENABLED              = var.azure_sync_enabled
+      DOMAIN                         = aws_directory_service_directory.ad_directory.name
+      BASE_DN                        = "DC=business,DC=abc,DC=com"
+      DYNAMODB_TABLE_NAME            = aws_dynamodb_table.onboarding_request_table.name
+      SNS_TOPIC_ARN                  = aws_sns_topic.notification_topic.arn
+      NOTIFY_SNS_LAMBDA_NAME         = aws_lambda_function.notify_sns_function.function_name
+      USE_MOCK_LDAP                  = var.use_mock_ldap
+      AZURE_SYNC_ENABLED             = var.azure_sync_enabled
       CONFIDENCE_THRESHOLD_SSM_PARAM = aws_ssm_parameter.confidence_threshold.name
     }
   }
@@ -473,11 +473,14 @@ resource "aws_apigatewayv2_authorizer" "api_key_authorizer" {
 }
 
 ### Use Lambda resource policy (aws_lambda_permission above) instead of IAM credentials
+### The /onboard route targets the thin slack_dispatch_function (defined in
+### slack_dispatch.tf), which acks Slack within 3s and async-invokes
+### onboarding_function. onboarding_function itself is unchanged.
 resource "aws_apigatewayv2_integration" "lambda_integration" {
-  api_id             = aws_apigatewayv2_api.onboarding_api.id
-  integration_type   = "AWS_PROXY"
-  integration_uri    = aws_lambda_function.onboarding_function.invoke_arn
-  depends_on         = [aws_lambda_function.onboarding_function]
+  api_id           = aws_apigatewayv2_api.onboarding_api.id
+  integration_type = "AWS_PROXY"
+  integration_uri  = aws_lambda_function.slack_dispatch_function.invoke_arn
+  depends_on       = [aws_lambda_function.slack_dispatch_function]
 }
 
 resource "aws_apigatewayv2_route" "onboarding_route" {
@@ -558,10 +561,10 @@ resource "aws_sqs_queue" "notify_dlq" {
 ### Alert when any message lands in the DLQ — indicates notify_sns_function
 ### failed all retries and a notification was lost. Fires within 1 minute.
 resource "aws_cloudwatch_metric_alarm" "notify_dlq_alarm" {
-  alarm_name          = "notify-sns-dlq-messages"
-  alarm_description   = "notify_sns_function exhausted all retries — one or more notifications were not delivered. Check the DLQ and CloudWatch Logs."
-  namespace           = "AWS/SQS"
-  metric_name         = "ApproximateNumberOfMessagesVisible"
+  alarm_name        = "notify-sns-dlq-messages"
+  alarm_description = "notify_sns_function exhausted all retries — one or more notifications were not delivered. Check the DLQ and CloudWatch Logs."
+  namespace         = "AWS/SQS"
+  metric_name       = "ApproximateNumberOfMessagesVisible"
   dimensions = {
     QueueName = aws_sqs_queue.notify_dlq.name
   }
@@ -629,7 +632,7 @@ resource "aws_directory_service_directory" "ad_directory" {
   # All LDAP operations used here (user create, group modify, account disable) work
   # identically on Simple AD. Switch to "MicrosoftAD" only if trust relationships or
   # MFA integration are needed.
-  type     = "SimpleAD"
+  type = "SimpleAD"
 
   vpc_settings {
     vpc_id     = aws_vpc.main.id

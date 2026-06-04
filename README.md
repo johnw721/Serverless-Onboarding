@@ -15,9 +15,12 @@ An automated employee onboarding system that uses Claude (via AWS Bedrock) to pr
 |---|---|
 | **API Gateway (HTTP API)** | Receives onboarding POST requests from Slack/Teams |
 | **AWS Lambda – authorizer_function** | REQUEST authorizer; validates `x-api-key` header on every request |
+| **AWS Lambda – slack_dispatch_function** | Fronts the `/onboard` route; returns a Slack ack within 3s and async-invokes the onboarding worker |
 | **AWS Lambda – onboarding_function** | Orchestrates the full onboarding pipeline |
 | **AWS Lambda – offboarding_function** | Disables AD account, revokes group membership, logs activity |
 | **AWS Lambda – notify_sns_function** | Decoupled SNS publisher, invoked asynchronously |
+| **AWS Lambda – slack_notifier_function** | Subscribed to SNS; posts notifications to a Slack incoming webhook (runs outside the VPC for internet egress) |
+| **CloudWatch Dashboard** | `ad-lambda-overview` — single-pane invocations, errors, latency, throttles, and DLQ depth |
 | **Claude 3 Haiku (AWS Bedrock)** | Parses NL requests, assigns AD groups, writes notifications |
 | **AWS Simple AD** | Target directory; users and groups created/disabled via LDAP |
 | **Microsoft Entra ID (optional)** | Synced via Graph API after AD provisioning/offboarding |
@@ -30,22 +33,25 @@ An automated employee onboarding system that uses Claude (via AWS Bedrock) to pr
 ### Data Flow
 
 ```
-Slack / API call (x-api-key header required)
+Slack slash command (/onboard …)   |   API call (x-api-key header or ?x-api-key= query param)
     → API Gateway (POST /onboard)
     → authorizer_function (Lambda REQUEST authorizer)
         ├─ key invalid → 403 Forbidden
-        └─ key valid   → onboarding_function (Lambda)
+        └─ key valid   → slack_dispatch_function (Lambda)
+                            → async-invokes onboarding_function (InvocationType=Event)
+                            → returns "Working on it…" ack to Slack within 3s
+                         onboarding_function (Lambda, async)
                             → Bedrock / Claude: parse NL text → structured employee fields
                             → Bedrock / Claude: map role to AD groups + confidence score
                                 ├─ confidence < 80% → DynamoDB ("Pending Review")
                                 │                    → SNS (manual review alert)
-                                │                    → 202 response
                                 └─ confidence ≥ 80% → LDAP: create user + assign groups
                                                      → DynamoDB ("Success" / "Failed")
                                                      → notify_sns_function (async invoke)
                                                          → Bedrock / Claude: write rich notification
                                                          → SNS: deliver to IT team
-                                                     → 200 / 500 response
+                            → SNS → slack_notifier_function → Slack incoming webhook
+                                    (result posted back into the channel)
 
 Slack / API call (x-api-key header required)
     → API Gateway (POST /offboard)
@@ -75,6 +81,14 @@ LangChain was considered but ruled out. The three Claude calls in this project �
 The SNS notification is decoupled into its own Lambda (`notify_sns_function`) invoked asynchronously (`InvocationType=Event`). This means a transient SNS failure never blocks or retries the main onboarding flow, and each function has a single, testable responsibility.
 
 The SNS client in `notify_sns_function` is initialized at module level rather than inside the handler, so warm Lambda invocations reuse the existing client and skip the boto3 initialization overhead entirely.
+
+### Slack 3-second ack and the dispatcher
+
+Slack slash commands require an HTTP response within 3 seconds, but the onboarding pipeline (Bedrock parsing plus provisioning) can take longer. Rather than refactor `onboarding_function` and its test suite, a thin `slack_dispatch_function` fronts the `/onboard` route: it async-invokes the worker (`InvocationType=Event`) and immediately returns a "Working on it…" acknowledgement. The actual result is delivered back to the channel asynchronously by `slack_notifier_function`. This keeps the worker's logic and tests untouched while giving Slack users instant feedback.
+
+### Slack delivery and VPC egress
+
+`onboarding_function`, `offboarding_function`, and `notify_sns_function` run inside a private VPC with no public egress (they reach AWS services through VPC interface endpoints only). Slack's incoming webhook lives on the public internet, so `slack_notifier_function` runs **outside** the VPC and subscribes to the SNS topic. SNS decouples the in-VPC publishers from the internet-facing delivery function. The webhook URL is stored as an SSM `SecureString` (decrypted at runtime), never as a plaintext environment variable or in Terraform state.
 
 ### Why AWS Simple AD over EC2-based AD or Managed Microsoft AD?
 
@@ -153,16 +167,24 @@ Every event — onboarding, offboarding, pending review, or failure — writes o
 │   ├── azure_sync.py        # Entra ID sync via Microsoft Graph API (optional)
 │   ├── helpers.py           # Validation, DynamoDB logging, shared maps
 │   ├── Notify_SNS.py        # SNS Lambda handler (async, decoupled)
+│   ├── slack_dispatch.py    # Fast 3s ack; async-invokes the onboarding worker
+│   ├── slack_notifier.py    # SNS → Slack incoming webhook delivery (outside VPC)
 │   ├── api_authorizer.py    # API Gateway REQUEST authorizer (x-api-key validation)
 │   └── requirements.txt     # ldap3, boto3, requests
 ├── terraform/
-│   ├── Infrastructure.tf    # All AWS resources
-│   ├── variables.tf         # Input variables (CIDRs, runtime, secrets, mock flag)
+│   ├── Infrastructure.tf    # Core AWS resources (VPC, API GW, Lambdas, SNS, DynamoDB, AD)
+│   ├── slack_dispatch.tf    # Dispatcher Lambda + least-privilege role + route permission
+│   ├── slack_notify.tf      # Slack notifier Lambda, SSM SecureString, SNS subscription
+│   ├── dashboard.tf         # CloudWatch dashboard (ad-lambda-overview)
+│   ├── alarms.tf            # CloudWatch alarms: onboarding errors + p99 latency
+│   ├── variables.tf         # Input variables (region, CIDRs, runtime, secrets, mock flag)
 │   └── provider.tf          # AWS provider + commented S3 remote state backend
 ├── tests/
 │   ├── test_helpers.py      # Unit tests for validate_employee_data + sanitize_dn_value
 │   └── test_bedrock_agent.py # Unit tests for all three Claude functions (mocked)
 ├── QA/                      # Sample curl requests and test payloads
+├── demo.ps1                 # One-shot demo driver: plan → apply → fire request → print dashboard URL
+├── DEMO_GUIDE.md            # Full runbook: setup → demo → artifacts → video script
 ├── .gitignore
 └── README.md
 ```
