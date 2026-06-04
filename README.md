@@ -1,7 +1,7 @@
 # Intelligent Active Directory User Onboarding System
 
-![CI](https://github.com/<your-org>/<your-repo>/actions/workflows/ci.yml/badge.svg)
-![CD](https://github.com/<your-org>/<your-repo>/actions/workflows/cd.yml/badge.svg)
+![CI](https://github.com/johnw721/serverless-onboarding/actions/workflows/ci.yml/badge.svg)
+![CD](https://github.com/johnw721/serverless-onboarding/actions/workflows/cd.yml/badge.svg)
 
 An automated employee onboarding system that uses Claude (via AWS Bedrock) to process natural language requests and provision Active Directory accounts with appropriate permissions based on role and department.
 
