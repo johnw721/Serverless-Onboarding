@@ -21,6 +21,7 @@ import json
 import logging
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 boto3_config = Config(connect_timeout=5, read_timeout=5)
 

@@ -58,6 +58,39 @@ def _post_to_slack(webhook_url, text):
     return body
 
 
+# Emoji per CloudWatch alarm state, for an at-a-glance status.
+_STATE_EMOJI = {"ALARM": ":red_circle:", "OK": ":large_green_circle:", "INSUFFICIENT_DATA": ":white_circle:"}
+
+
+def _format_message(subject, message):
+    """Render an SNS message for Slack.
+
+    CloudWatch alarm notifications arrive as a JSON blob. Collapse them into a
+    single readable line. Anything else (e.g. onboarding result text) is passed
+    through unchanged under its subject heading.
+    """
+    try:
+        data = json.loads(message)
+    except (json.JSONDecodeError, TypeError):
+        data = None
+
+    if isinstance(data, dict) and "AlarmName" in data:
+        name = data.get("AlarmName", "unknown-alarm")
+        state = data.get("NewStateValue", "UNKNOWN")
+        emoji = _STATE_EMOJI.get(state, ":grey_question:")
+        reason = data.get("NewStateReason", "")
+        region = data.get("Region", "")
+        line = f"{emoji} *{name}* is now *{state}*"
+        if region:
+            line += f"  ·  {region}"
+        if reason:
+            line += f"\n_{reason}_"
+        return line
+
+    # Non-alarm message: keep the existing subject + body format.
+    return f"*{subject}*\n{message}"
+
+
 def lambda_handler(event, context):
     try:
         webhook_url = _get_webhook_url()
@@ -75,7 +108,7 @@ def lambda_handler(event, context):
         sns = record.get("Sns", {})
         subject = sns.get("Subject") or "Notification"
         message = sns.get("Message", "")
-        text = f"*{subject}*\n{message}"
+        text = _format_message(subject, message)
         try:
             _post_to_slack(webhook_url, text)
             delivered += 1

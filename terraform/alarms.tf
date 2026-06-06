@@ -8,10 +8,10 @@
 
 # Any error from the onboarding worker within a 5-minute window.
 resource "aws_cloudwatch_metric_alarm" "onboarding_errors" {
-  alarm_name          = "onboarding-function-errors"
-  alarm_description   = "onboarding_function returned one or more errors. Check CloudWatch Logs for the failing request."
-  namespace           = "AWS/Lambda"
-  metric_name         = "Errors"
+  alarm_name        = "onboarding-function-errors"
+  alarm_description = "onboarding_function returned one or more errors. Check CloudWatch Logs for the failing request."
+  namespace         = "AWS/Lambda"
+  metric_name       = "Errors"
   dimensions = {
     FunctionName = aws_lambda_function.onboarding_function.function_name
   }
@@ -33,10 +33,10 @@ resource "aws_cloudwatch_metric_alarm" "onboarding_errors" {
 # p99 latency above 10s sustained for 2 consecutive minutes. Onboarding does
 # Bedrock + LDAP, so this catches genuine slowdowns without flagging normal runs.
 resource "aws_cloudwatch_metric_alarm" "onboarding_latency_p99" {
-  alarm_name          = "onboarding-function-latency-p99"
-  alarm_description   = "onboarding_function p99 duration exceeded 10s for 2 minutes. Investigate Bedrock or LDAP latency."
-  namespace           = "AWS/Lambda"
-  metric_name         = "Duration"
+  alarm_name        = "onboarding-function-latency-p99"
+  alarm_description = "onboarding_function p99 duration exceeded 10s for 2 minutes. Investigate Bedrock or LDAP latency."
+  namespace         = "AWS/Lambda"
+  metric_name       = "Duration"
   dimensions = {
     FunctionName = aws_lambda_function.onboarding_function.function_name
   }

@@ -1,4 +1,5 @@
 import boto3
+from botocore.config import Config
 import os
 import re
 import time
@@ -103,7 +104,12 @@ def log_onboarding_request(
     if confidence is not None:
         item["confidence"] = str(round(confidence, 4))  # DynamoDB has no float type; store as string
 
-    dynamodb = boto3.resource("dynamodb")
+    # Bounded so an unreachable DynamoDB endpoint fails fast instead of hanging
+    # the Lambda to its timeout.
+    dynamodb = boto3.resource(
+        "dynamodb",
+        config=Config(connect_timeout=3, read_timeout=3, retries={"max_attempts": 2}),
+    )
     table = dynamodb.Table(os.environ.get("DYNAMODB_TABLE_NAME"))
     try:
         table.put_item(Item=item)

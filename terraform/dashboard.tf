@@ -29,12 +29,12 @@ resource "aws_cloudwatch_dashboard" "overview" {
         width  = 12
         height = 6
         properties = {
-          title  = "Lambda Invocations"
-          view   = "timeSeries"
+          title   = "Lambda Invocations"
+          view    = "timeSeries"
           stacked = false
-          region = var.aws_region
-          stat   = "Sum"
-          period = 60
+          region  = var.aws_region
+          stat    = "Sum"
+          period  = 60
           metrics = [
             ["AWS/Lambda", "Invocations", "FunctionName", aws_lambda_function.slack_dispatch_function.function_name],
             ["...", aws_lambda_function.onboarding_function.function_name],
@@ -51,12 +51,12 @@ resource "aws_cloudwatch_dashboard" "overview" {
         width  = 12
         height = 6
         properties = {
-          title  = "Lambda Errors"
-          view   = "timeSeries"
+          title   = "Lambda Errors"
+          view    = "timeSeries"
           stacked = false
-          region = var.aws_region
-          stat   = "Sum"
-          period = 60
+          region  = var.aws_region
+          stat    = "Sum"
+          period  = 60
           metrics = [
             ["AWS/Lambda", "Errors", "FunctionName", aws_lambda_function.slack_dispatch_function.function_name],
             ["...", aws_lambda_function.onboarding_function.function_name],
@@ -73,12 +73,12 @@ resource "aws_cloudwatch_dashboard" "overview" {
         width  = 12
         height = 6
         properties = {
-          title  = "Lambda Duration (p99, ms)"
-          view   = "timeSeries"
+          title   = "Lambda Duration (p99, ms)"
+          view    = "timeSeries"
           stacked = false
-          region = var.aws_region
-          stat   = "p99"
-          period = 60
+          region  = var.aws_region
+          stat    = "p99"
+          period  = 60
           metrics = [
             ["AWS/Lambda", "Duration", "FunctionName", aws_lambda_function.slack_dispatch_function.function_name],
             ["...", aws_lambda_function.onboarding_function.function_name],
@@ -95,12 +95,12 @@ resource "aws_cloudwatch_dashboard" "overview" {
         width  = 12
         height = 6
         properties = {
-          title  = "Lambda Throttles"
-          view   = "timeSeries"
+          title   = "Lambda Throttles"
+          view    = "timeSeries"
           stacked = false
-          region = var.aws_region
-          stat   = "Sum"
-          period = 60
+          region  = var.aws_region
+          stat    = "Sum"
+          period  = 60
           metrics = [
             ["AWS/Lambda", "Throttles", "FunctionName", aws_lambda_function.slack_dispatch_function.function_name],
             ["...", aws_lambda_function.onboarding_function.function_name],
@@ -117,12 +117,12 @@ resource "aws_cloudwatch_dashboard" "overview" {
         width  = 12
         height = 6
         properties = {
-          title  = "API Gateway — Requests & Errors"
-          view   = "timeSeries"
+          title   = "API Gateway — Requests & Errors"
+          view    = "timeSeries"
           stacked = false
-          region = var.aws_region
-          stat   = "Sum"
-          period = 60
+          region  = var.aws_region
+          stat    = "Sum"
+          period  = 60
           metrics = [
             ["AWS/ApiGateway", "Count", "ApiId", aws_apigatewayv2_api.onboarding_api.id],
             [".", "4xx", "ApiId", aws_apigatewayv2_api.onboarding_api.id],
@@ -137,11 +137,11 @@ resource "aws_cloudwatch_dashboard" "overview" {
         width  = 12
         height = 6
         properties = {
-          title  = "API Gateway — Latency (ms) & Notify DLQ Depth"
-          view   = "timeSeries"
+          title   = "API Gateway — Latency (ms) & Notify DLQ Depth"
+          view    = "timeSeries"
           stacked = false
-          region = var.aws_region
-          period = 60
+          region  = var.aws_region
+          period  = 60
           metrics = [
             ["AWS/ApiGateway", "Latency", "ApiId", aws_apigatewayv2_api.onboarding_api.id, { stat = "p99" }],
             ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", aws_sqs_queue.notify_dlq.name, { stat = "Maximum" }],

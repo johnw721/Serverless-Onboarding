@@ -34,7 +34,7 @@ resource "aws_security_group" "lambda_sg" {
   vpc_id      = aws_vpc.main.id
 }
 
-### Allow all egress within the VPC (reaches VPC endpoints and the AD directory)
+### Allow all egress within the VPC (reaches the interface VPC endpoints and the AD directory)
 resource "aws_security_group_rule" "lambda_egress_vpc" {
   type              = "egress"
   from_port         = 0
@@ -42,7 +42,21 @@ resource "aws_security_group_rule" "lambda_egress_vpc" {
   protocol          = "-1"
   security_group_id = aws_security_group.lambda_sg.id
   cidr_blocks       = [var.vpc_cidr_block]
-  description       = "Allow Lambda to reach VPC endpoints and AD"
+  description       = "Allow Lambda to reach VPC interface endpoints and AD"
+}
+
+### DynamoDB (and S3) use a GATEWAY endpoint, whose traffic is routed to the
+### service's public prefix list — addresses OUTSIDE the VPC CIDR. The egress
+### rule above (VPC CIDR only) therefore blocks it, causing a connect timeout to
+### dynamodb.<region>.amazonaws.com. Allow egress to the gateway prefix list.
+resource "aws_security_group_rule" "lambda_egress_dynamodb" {
+  type              = "egress"
+  from_port         = 443
+  to_port           = 443
+  protocol          = "tcp"
+  security_group_id = aws_security_group.lambda_sg.id
+  prefix_list_ids   = [aws_vpc_endpoint.dynamodb_endpoint.prefix_list_id]
+  description       = "Allow Lambda to reach DynamoDB via its gateway endpoint"
 }
 
 ### Security group for VPC Interface Endpoints
@@ -77,13 +91,13 @@ resource "aws_vpc_endpoint" "secretsmanager_endpoint" {
   private_dns_enabled = true
 }
 
+# DynamoDB (and S3) only support Gateway endpoints, not Interface.
+# Gateway endpoints attach to route tables and do not support private DNS.
 resource "aws_vpc_endpoint" "dynamodb_endpoint" {
-  vpc_id              = aws_vpc.main.id
-  service_name        = "com.amazonaws.us-west-2.dynamodb"
-  vpc_endpoint_type   = "Interface"
-  subnet_ids          = [aws_subnet.foo.id]
-  security_group_ids  = [aws_security_group.vpc_endpoint_sg.id]
-  private_dns_enabled = true
+  vpc_id            = aws_vpc.main.id
+  service_name      = "com.amazonaws.us-west-2.dynamodb"
+  vpc_endpoint_type = "Gateway"
+  route_table_ids   = [aws_vpc.main.main_route_table_id]
 }
 
 resource "aws_vpc_endpoint" "sns_endpoint" {
@@ -119,6 +133,18 @@ resource "aws_vpc_endpoint" "bedrock_endpoint" {
 resource "aws_vpc_endpoint" "sqs_endpoint" {
   vpc_id              = aws_vpc.main.id
   service_name        = "com.amazonaws.us-west-2.sqs"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = [aws_subnet.foo.id]
+  security_group_ids  = [aws_security_group.vpc_endpoint_sg.id]
+  private_dns_enabled = true
+}
+
+### Needed for onboarding_function to read the confidence threshold from SSM
+### Parameter Store within the VPC. Without this, the in-VPC SSM call has no
+### route to the service and hangs until the Lambda times out.
+resource "aws_vpc_endpoint" "ssm_endpoint" {
+  vpc_id              = aws_vpc.main.id
+  service_name        = "com.amazonaws.us-west-2.ssm"
   vpc_endpoint_type   = "Interface"
   subnet_ids          = [aws_subnet.foo.id]
   security_group_ids  = [aws_security_group.vpc_endpoint_sg.id]
@@ -205,10 +231,12 @@ resource "aws_iam_policy" "lambda_policy" {
         Sid    = "BedrockInvokeClaude"
         Effect = "Allow"
         Action = ["bedrock:InvokeModel"]
-        # Scoped to Claude 3 Haiku — the only model this system calls.
-        # Update if switching to a different model.
+        # Claude Haiku 4.5 via the US cross-region inference profile. The profile
+        # is invoked by ARN, and it may route to the underlying foundation model
+        # in any US region, so both must be permitted.
         Resource = [
-          "arn:aws:bedrock:us-west-2::foundation-model/anthropic.claude-3-haiku-20240307-v1:0"
+          "arn:aws:bedrock:us-west-2:${data.aws_caller_identity.current.account_id}:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0",
+          "arn:aws:bedrock:*::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0"
         ]
       },
       {
@@ -244,33 +272,40 @@ resource "aws_iam_role_policy_attachment" "lambda_role_custom" {
 ### ============================================================
 
 resource "aws_secretsmanager_secret" "ldap_server_address" {
-  name = "ldap_server_address"
+  name                    = "ldap_server_address"
+  recovery_window_in_days = 0
 }
 
 resource "aws_secretsmanager_secret" "ldap_username" {
-  name = "ldap_username"
+  name                    = "ldap_username"
+  recovery_window_in_days = 0
 }
 
 resource "aws_secretsmanager_secret" "ldap_password" {
-  name = "ldap_password"
+  name                    = "ldap_password"
+  recovery_window_in_days = 0
 }
 
 ### Azure AD / Entra ID credentials (populate after first apply if using Azure sync)
 resource "aws_secretsmanager_secret" "azure_tenant_id" {
-  name = "azure_tenant_id"
+  name                    = "azure_tenant_id"
+  recovery_window_in_days = 0
 }
 
 resource "aws_secretsmanager_secret" "azure_client_id" {
-  name = "azure_client_id"
+  name                    = "azure_client_id"
+  recovery_window_in_days = 0
 }
 
 resource "aws_secretsmanager_secret" "azure_client_secret" {
-  name = "azure_client_secret"
+  name                    = "azure_client_secret"
+  recovery_window_in_days = 0
 }
 
 ### Directory Service admin password (used by aws_directory_service_directory only)
 resource "aws_secretsmanager_secret" "directory_admin_password" {
-  name = "directory_admin_password"
+  name                    = "directory_admin_password"
+  recovery_window_in_days = 0
 }
 
 resource "aws_secretsmanager_secret_version" "directory_admin_password_version" {
@@ -289,10 +324,14 @@ resource "aws_secretsmanager_secret_version" "directory_admin_password_version" 
 resource "null_resource" "pip_install" {
   triggers = {
     requirements = filemd5("${path.module}/../lambda-package/requirements.txt")
+    # Re-run (and therefore re-zip via the dependent archive_file) whenever any
+    # top-level handler .py changes. Without this, archive_file caches its result
+    # because it depends_on this null_resource, and code edits never get packaged.
+    source_code = sha1(join("", [for f in fileset("${path.module}/../lambda-package", "*.py") : filesha1("${path.module}/../lambda-package/${f}")]))
   }
 
   provisioner "local-exec" {
-    command = "pip install -r ${path.module}/../lambda-package/requirements.txt -t ${path.module}/../lambda-package/ --quiet"
+    command = "python -m pip install -r ${path.module}/../lambda-package/requirements.txt -t ${path.module}/../lambda-package/ --quiet"
   }
 }
 
@@ -302,7 +341,11 @@ data "archive_file" "lambda_zip" {
   source_dir  = "../lambda-package"
   output_path = "lambda_function.zip"
   excludes    = ["__pycache__", "*.pyc", "*.pyo"]
-  depends_on  = [null_resource.pip_install]
+  # NOTE: no depends_on. A data source with depends_on caches its result and
+  # won't re-archive when only source files change (even when the dependency is
+  # replaced) — which silently ships stale Lambda code. Dependencies are vendored
+  # into lambda-package (and pip_install still runs on requirements/code change),
+  # so the archive can safely read current files on every plan.
 }
 
 
@@ -461,7 +504,13 @@ resource "aws_apigatewayv2_api" "onboarding_api" {
 }
 
 
-### Lambda REQUEST authorizer — requires x-api-key header on all requests
+### Lambda REQUEST authorizer — validates x-api-key on every request.
+### identity_sources is intentionally empty: with any source listed, HTTP API
+### returns 401 WITHOUT invoking the authorizer when that source is absent.
+### Slack slash commands can't send headers (they pass ?x-api-key= in the query
+### string), so a header identity source would 401 every Slack request before
+### our code runs. With no identity source, the authorizer is invoked on every
+### request and api_authorizer.py checks both the header and the query string.
 resource "aws_apigatewayv2_authorizer" "api_key_authorizer" {
   api_id                            = aws_apigatewayv2_api.onboarding_api.id
   authorizer_type                   = "REQUEST"
@@ -469,7 +518,8 @@ resource "aws_apigatewayv2_authorizer" "api_key_authorizer" {
   name                              = "api_key_authorizer"
   enable_simple_responses           = true
   authorizer_payload_format_version = "2.0"
-  identity_sources                  = ["$request.header.x-api-key"]
+  identity_sources                  = []
+  authorizer_result_ttl_in_seconds  = 0 # caching requires an identity source; disable it
 }
 
 ### Use Lambda resource policy (aws_lambda_permission above) instead of IAM credentials

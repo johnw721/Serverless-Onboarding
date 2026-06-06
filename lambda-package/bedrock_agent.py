@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 # ── Bedrock ───────────────────────────────────────────────────────────────────
 
-MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "anthropic.claude-3-haiku-20240307")
+MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-haiku-4-5-20251001-v1:0")
 
 # Lazy-initialized -- not created at module load time so a cold start never
 # fails due to missing credentials or an unreachable endpoint before the
@@ -21,9 +21,17 @@ _bedrock_runtime = None
 def _get_bedrock_client():
     global _bedrock_runtime
     if _bedrock_runtime is None:
+        # Bound the call so a hung/throttled model can't run the whole Lambda to
+        # its 60s timeout before the callers' fallbacks engage. Worst case per
+        # call is connect_timeout + read_timeout * max_attempts ≈ 5 + 10*2 = 25s,
+        # leaving budget for the template fallback and the SNS notification.
         _bedrock_runtime = boto3.client(
             "bedrock-runtime",
-            config=Config(connect_timeout=10, read_timeout=30),
+            config=Config(
+                connect_timeout=5,
+                read_timeout=10,
+                retries={"max_attempts": 2, "mode": "standard"},
+            ),
         )
     return _bedrock_runtime
 
@@ -65,7 +73,12 @@ _threshold_cache: dict = {"value": None, "loaded_at": 0.0}
 def _get_ssm_client():
     global _ssm_client
     if _ssm_client is None:
-        _ssm_client = boto3.client("ssm")
+        # Bounded so an unreachable SSM endpoint fails fast and get_confidence_threshold
+        # falls back to the default/cached value instead of hanging the whole Lambda.
+        _ssm_client = boto3.client(
+            "ssm",
+            config=Config(connect_timeout=2, read_timeout=2, retries={"max_attempts": 2}),
+        )
     return _ssm_client
 
 

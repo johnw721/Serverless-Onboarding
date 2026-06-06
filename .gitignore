@@ -20,8 +20,12 @@ pytest-cache-files-*/
 # Generated Lambda deployment artifact
 /terraform/lambda_function.zip
 
+# Debug artifacts (downloaded copy of the deployed function for inspection)
+/terraform/deployed.zip
+/terraform/deployed_check/
+
 # Saved plan files — these embed variable values (incl. secrets) in plaintext
-/terraform/main-plan-v1
+/terraform/main-plan-*
 *.tfplan
 
 # Terraform run logs
@@ -52,3 +56,7 @@ lambda-package/python_dateutil*
 # ── Project-specific ──────────────────────────────────────────
 /terraform/LEARNING_LESSONS.md
 DEMO_GUIDE.md
+Artifacts.md
+image.png
+DEBUG_SESSION_SUMMARY.md
+DEBUG_COMMANDS.md

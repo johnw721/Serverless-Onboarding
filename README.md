@@ -21,7 +21,7 @@ An automated employee onboarding system that uses Claude (via AWS Bedrock) to pr
 | **AWS Lambda – notify_sns_function** | Decoupled SNS publisher, invoked asynchronously |
 | **AWS Lambda – slack_notifier_function** | Subscribed to SNS; posts notifications to a Slack incoming webhook (runs outside the VPC for internet egress) |
 | **CloudWatch Dashboard** | `ad-lambda-overview` — single-pane invocations, errors, latency, throttles, and DLQ depth |
-| **Claude 3 Haiku (AWS Bedrock)** | Parses NL requests, assigns AD groups, writes notifications |
+| **Claude Haiku 4.5 (AWS Bedrock)** | Parses NL requests, assigns AD groups, writes notifications (via the US cross-region inference profile) |
 | **AWS Simple AD** | Target directory; users and groups created/disabled via LDAP |
 | **Microsoft Entra ID (optional)** | Synced via Graph API after AD provisioning/offboarding |
 | **SSM Parameter Store** | Stores the confidence threshold; adjustable without redeployment |
@@ -195,7 +195,7 @@ Every event — onboarding, offboarding, pending review, or failure — writes o
 
 ### Prerequisites
 
-- AWS account with Bedrock access and Claude 3 Haiku model enabled in `us-west-2`
+- AWS account with Bedrock access to Claude Haiku 4.5 in `us-west-2` (Anthropic models need a one-time AWS Marketplace subscription — see DEMO_GUIDE.md "Enable the model")
 - Terraform ≥ 1.5
 - Python 3.11 + pip (must be Linux x86\_64 for Lambda-compatible binaries — use Docker if on Mac/Windows ARM)
 
@@ -317,8 +317,8 @@ Update the badge URLs at the top of this file by replacing `<your-org>/<your-rep
 ## Security
 
 - **Secrets Manager** — LDAP credentials never appear in environment variables or code
-- **VPC isolation** — both Lambda functions run inside the VPC; all AWS service calls go through Interface Endpoints and never leave the AWS backbone
-- **Least-privilege IAM** — Lambda role is scoped to specific resource ARNs throughout: Secrets Manager, DynamoDB, SNS, SSM, the notify Lambda function, and the exact Claude 3 Haiku model ARN in Bedrock
+- **VPC isolation** — the in-VPC Lambdas reach AWS services privately: Interface endpoints for Secrets Manager, SNS, Lambda, Bedrock Runtime, SQS, and SSM, plus a Gateway endpoint for DynamoDB. Traffic never leaves the AWS backbone. (Gateway-endpoint traffic targets the service's public prefix list, so the Lambda security group must allow egress to that prefix list — not just the VPC CIDR.)
+- **Least-privilege IAM** — Lambda role is scoped to specific resource ARNs throughout: Secrets Manager, DynamoDB, SNS, SSM, the notify Lambda function, and the Claude Haiku 4.5 inference profile + foundation-model ARN in Bedrock
 - **API key authentication** — all requests authenticated via a Lambda REQUEST authorizer before reaching the onboarding pipeline
 - **API Gateway throttling** — burst limit of 10 req/s and sustained rate of 5 req/s protect downstream Bedrock and LDAP from runaway callers even with a valid key
 - **Confidence gating** — ambiguous requests are flagged for human review rather than auto-provisioned
