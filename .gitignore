@@ -37,26 +37,24 @@ pytest-cache-files-*/
 *.tfvars.json
 
 # ── Lambda package – pip-installed dependencies ───────────────
-# These are installed into lambda-package/ by the Terraform
-# null_resource before zipping. Don't commit them.
-lambda-package/*.dist-info/
-lambda-package/*.egg-info/
-lambda-package/bin/
-lambda-package/boto3/
-lambda-package/botocore/
-lambda-package/ldap3/
-lambda-package/pyasn1/
-lambda-package/jmespath/
-lambda-package/s3transfer/
-lambda-package/six*
-lambda-package/urllib3/
-lambda-package/dateutil/
-lambda-package/python_dateutil*
+# Terraform's null_resource pip-installs all runtime deps into
+# lambda-package/ before zipping. Ignore the entire directory's
+# contents, then re-include only the hand-written source modules
+# and the requirements manifest. This auto-ignores any new/updated
+# dependency (boto3, botocore, ldap3, etc.) without maintenance.
+lambda-package/*
+!lambda-package/*.py
+!lambda-package/requirements.txt
 
-# ── Project-specific ──────────────────────────────────────────
-/terraform/LEARNING_LESSONS.md
-DEMO_GUIDE.md
+# ── Editors / OS ──────────────────────────────────────────────
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ── Project-specific scratch (local-only notes & artifacts) ───
 Artifacts.md
-image.png
-DEBUG_SESSION_SUMMARY.md
 DEBUG_COMMANDS.md
+DEBUG_SESSION_SUMMARY.md
+image.png
+docs/

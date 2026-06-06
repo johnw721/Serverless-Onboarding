@@ -182,9 +182,11 @@ Every event — onboarding, offboarding, pending review, or failure — writes o
 ├── tests/
 │   ├── test_helpers.py      # Unit tests for validate_employee_data + sanitize_dn_value
 │   └── test_bedrock_agent.py # Unit tests for all three Claude functions (mocked)
-├── QA/                      # Sample curl requests and test payloads
 ├── demo.ps1                 # One-shot demo driver: plan → apply → fire request → print dashboard URL
-├── DEMO_GUIDE.md            # Full runbook: setup → demo → artifacts → video script
+├── docs/
+│   ├── DEMO_GUIDE.md        # Full runbook: setup → demo → artifacts → video script
+│   ├── LEARNING_LESSONS.md  # Build notes & lessons learned
+│   └── sample_requests.md   # Sample Slack payloads (happy path, manual-review, validation, injection)
 ├── .gitignore
 └── README.md
 ```
@@ -195,7 +197,7 @@ Every event — onboarding, offboarding, pending review, or failure — writes o
 
 ### Prerequisites
 
-- AWS account with Bedrock access to Claude Haiku 4.5 in `us-west-2` (Anthropic models need a one-time AWS Marketplace subscription — see DEMO_GUIDE.md "Enable the model")
+- AWS account with Bedrock access to Claude Haiku 4.5 in `us-west-2` (Anthropic models need a one-time AWS Marketplace subscription — see docs/DEMO_GUIDE.md "Enable the model")
 - Terraform ≥ 1.5
 - Python 3.11 + pip (must be Linux x86\_64 for Lambda-compatible binaries — use Docker if on Mac/Windows ARM)
 
@@ -357,7 +359,4 @@ Assuming 20 onboardings/month: **~$900/month saved in IT labor**, with a payback
 - ✅ **Offboarding** — full mirror flow: account disable, group removal, Entra ID deprovision, audit log
 - ✅ **Microsoft Entra ID sync** — Graph API provisioning and deprovisioning for Microsoft 365 access
 - ✅ **Security best practices** — Secrets Manager, VPC isolation, least-privilege IAM (resource-specific ARNs throughout), LDAP injection prevention, cryptographically random temp passwords, API Gateway throttling
-- ✅ **Resilient notification path** — `notify_sns_function` invoked asynchronously; SQS DLQ captures failures after Lambda's built-in retries; CloudWatch alarm fires within 60 s and re-alerts via SNS
-- ✅ **Infrastructure as code** — fully reproducible Terraform deployment with S3 remote state
-- ✅ **Observability** — CloudWatch Logs + DynamoDB audit trail (UUID-keyed, append-only; stores role, department, groups, and confidence per event) + DLQ alarm with SNS alerting
-- ✅ **Test coverage** — 65 tests (unit + moto-backed integration); all mocked, zero AWS spend in CI
+- ✅ **Resilient notification path** — `notify_sns_function` invoked asynchronously; SQS DLQ captures failures after Lambda's built-in retries; CloudWatch alarm fires within 60 s
