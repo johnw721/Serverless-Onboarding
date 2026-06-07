@@ -533,27 +533,36 @@ resource "aws_apigatewayv2_integration" "lambda_integration" {
   depends_on       = [aws_lambda_function.slack_dispatch_function]
 }
 
+### No API Gateway authorizer on /onboard OR /offboard: slack_dispatch_function
+### authenticates the caller itself by verifying the Slack signing-secret HMAC
+### over the raw body (X-Slack-Signature). The old x-api-key authorizer broke on
+### every key rotation and leaked the key into URL/access logs. Both routes are
+### authorization_type = "NONE" and front the dispatcher; the dispatcher rejects
+### anything without a valid Slack signature.
 resource "aws_apigatewayv2_route" "onboarding_route" {
   api_id             = aws_apigatewayv2_api.onboarding_api.id
   route_key          = "POST /onboard"
   target             = "integrations/${aws_apigatewayv2_integration.lambda_integration.id}"
-  authorization_type = "CUSTOM"
-  authorizer_id      = aws_apigatewayv2_authorizer.api_key_authorizer.id
+  authorization_type = "NONE"
 }
 
+# /offboard, like /onboard, is fronted by the thin slack_dispatch_function: it
+# verifies the Slack signing-secret HMAC, acks Slack within 3s, and async-invokes
+# offboarding_function. The integration therefore targets the dispatcher, and the
+# route has no API Gateway authorizer (auth is the Slack signature inside the
+# dispatcher). The dispatcher picks the worker from the request path.
 resource "aws_apigatewayv2_integration" "offboard_integration" {
   api_id           = aws_apigatewayv2_api.onboarding_api.id
   integration_type = "AWS_PROXY"
-  integration_uri  = aws_lambda_function.offboarding_function.invoke_arn
-  depends_on       = [aws_lambda_function.offboarding_function]
+  integration_uri  = aws_lambda_function.slack_dispatch_function.invoke_arn
+  depends_on       = [aws_lambda_function.slack_dispatch_function]
 }
 
 resource "aws_apigatewayv2_route" "offboarding_route" {
   api_id             = aws_apigatewayv2_api.onboarding_api.id
   route_key          = "POST /offboard"
   target             = "integrations/${aws_apigatewayv2_integration.offboard_integration.id}"
-  authorization_type = "CUSTOM"
-  authorizer_id      = aws_apigatewayv2_authorizer.api_key_authorizer.id
+  authorization_type = "NONE"
 }
 
 resource "aws_apigatewayv2_stage" "default" {

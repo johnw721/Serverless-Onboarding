@@ -38,6 +38,64 @@ ROLE_TO_GROUPS_MAP = {
     "Operations Manager": ["Operations", ALL_EMPLOYEES_GROUP],
 }
 
+# Department -> AD group. Group membership is DEPARTMENT-driven: a new hire is
+# placed in their department's group (plus "All Employees"), regardless of any
+# keyword in their job title. Canonical source for the deterministic path in
+# bedrock_agent.get_group_assignments.
+DEPARTMENT_TO_GROUP = {
+    "Engineering": "Engineering",
+    "Data Science": "Data Science",
+    "Product": "Product",
+    "Human Resources": "Human Resources",
+    "Sales": "Sales",
+    "Marketing": "Marketing",
+    "Support": "Support",
+    "Finance": "Finance",
+    "IT": "IT",
+    "Operations": "Operations",
+}
+
+# Common ways a department might be written -> canonical group name. Matched
+# case-insensitively after stripping a trailing "department"/"team"/etc.
+_DEPARTMENT_ALIASES = {
+    "engineering": "Engineering",
+    "eng": "Engineering",
+    "data science": "Data Science",
+    "product": "Product",
+    "human resources": "Human Resources",
+    "hr": "Human Resources",
+    "people": "Human Resources",
+    "sales": "Sales",
+    "marketing": "Marketing",
+    "support": "Support",
+    "customer support": "Support",
+    "customer success": "Support",
+    "finance": "Finance",
+    "accounting": "Finance",
+    "it": "IT",
+    "information technology": "IT",
+    "operations": "Operations",
+    "ops": "Operations",
+}
+
+
+def resolve_department_group(department):
+    """
+    Resolve a free-form department string to a canonical AD group name, or None
+    if it cannot be matched (caller then falls back to the LLM path).
+
+    Matching is case-insensitive and tolerant of a trailing "Department",
+    "Dept", "Team", "Org", etc. Job titles are intentionally NOT consulted.
+    """
+    if not department:
+        return None
+    key = department.strip().lower()
+    for suffix in (" department", " dept", " team", " org", " division", " group"):
+        if key.endswith(suffix):
+            key = key[: -len(suffix)].strip()
+    return _DEPARTMENT_ALIASES.get(key)
+
+
 # Audit log TTL: records older than this are automatically deleted by DynamoDB
 _TTL_SECONDS = 365 * 24 * 60 * 60  # 1 year
 
@@ -58,10 +116,14 @@ def sanitize_dn_value(value: str) -> str:
 
 def validate_employee_data(employee_data):
     """
-    Validate that all required fields are present and non-null.
-    Role is not checked against the hardcoded map — Claude handles novel titles.
+    Validate that the fields required to create an account are present and non-null.
+
+    Department is intentionally NOT required: an unstated department is left as
+    null and routed to manual review by get_group_assignments, rather than being
+    guessed from the job title. Role is not checked against the hardcoded map -
+    Claude handles novel titles.
     """
-    required_fields = ["username", "name", "Role", "Department"]
+    required_fields = ["username", "name", "Role"]
     missing_fields = [
         field for field in required_fields
         if not employee_data.get(field)
@@ -82,7 +144,7 @@ def log_onboarding_request(
     Each call writes a new item with a UUID partition key so that multiple
     events for the same employee (onboard, offboard, re-onboard, pending
     review) are all preserved. Using the username as the key caused silent
-    overwrites — a UUID guarantees append-only behaviour.
+    overwrites - a UUID guarantees append-only behaviour.
 
     Optional fields:
         groups      - list of AD groups assigned/removed (omitted if None)

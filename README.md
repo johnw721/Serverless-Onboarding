@@ -14,14 +14,14 @@ An automated employee onboarding system that uses Claude (via AWS Bedrock) to pr
 | Service | Role |
 |---|---|
 | **API Gateway (HTTP API)** | Receives onboarding POST requests from Slack/Teams |
-| **AWS Lambda – authorizer_function** | REQUEST authorizer; validates `x-api-key` header on every request |
-| **AWS Lambda – slack_dispatch_function** | Fronts the `/onboard` route; returns a Slack ack within 3s and async-invokes the onboarding worker |
+| **AWS Lambda – authorizer_function** | Legacy `x-api-key` REQUEST authorizer. No longer attached to a route — both `/onboard` and `/offboard` authenticate via Slack signing-secret HMAC in `slack_dispatch_function`. Kept for optional non-Slack API-key access |
+| **AWS Lambda – slack_dispatch_function** | Fronts the `/onboard` and `/offboard` routes; verifies the Slack signing secret, returns a 3s ack, and async-invokes the matching worker (onboarding or offboarding) |
 | **AWS Lambda – onboarding_function** | Orchestrates the full onboarding pipeline |
 | **AWS Lambda – offboarding_function** | Disables AD account, revokes group membership, logs activity |
 | **AWS Lambda – notify_sns_function** | Decoupled SNS publisher, invoked asynchronously |
 | **AWS Lambda – slack_notifier_function** | Subscribed to SNS; posts notifications to a Slack incoming webhook (runs outside the VPC for internet egress) |
 | **CloudWatch Dashboard** | `ad-lambda-overview` — single-pane invocations, errors, latency, throttles, and DLQ depth |
-| **Claude Haiku 4.5 (AWS Bedrock)** | Parses NL requests, assigns AD groups, writes notifications (via the US cross-region inference profile) |
+| **Claude Haiku 4.5 (AWS Bedrock)** | Parses NL requests and writes notifications; assigns AD groups only as a fallback when a department cannot be resolved deterministically (via the US cross-region inference profile) |
 | **AWS Simple AD** | Target directory; users and groups created/disabled via LDAP |
 | **Microsoft Entra ID (optional)** | Synced via Graph API after AD provisioning/offboarding |
 | **SSM Parameter Store** | Stores the confidence threshold; adjustable without redeployment |
@@ -33,16 +33,16 @@ An automated employee onboarding system that uses Claude (via AWS Bedrock) to pr
 ### Data Flow
 
 ```
-Slack slash command (/onboard …)   |   API call (x-api-key header or ?x-api-key= query param)
-    → API Gateway (POST /onboard)
-    → authorizer_function (Lambda REQUEST authorizer)
-        ├─ key invalid → 403 Forbidden
-        └─ key valid   → slack_dispatch_function (Lambda)
+Slack slash command (/onboard …)
+    → API Gateway (POST /onboard, no authorizer)
+    → slack_dispatch_function (Lambda)
+        ├─ Slack signature invalid → 401 Unauthorized
+        └─ Slack signature valid:
                             → async-invokes onboarding_function (InvocationType=Event)
                             → returns "Working on it…" ack to Slack within 3s
                          onboarding_function (Lambda, async)
                             → Bedrock / Claude: parse NL text → structured employee fields
-                            → Bedrock / Claude: map role to AD groups + confidence score
+                            → Map department to AD group (deterministic), or Claude if the department is unrecognized; + confidence score
                                 ├─ confidence < 80% → DynamoDB ("Pending Review")
                                 │                    → SNS (manual review alert)
                                 └─ confidence ≥ 80% → LDAP: create user + assign groups
@@ -53,10 +53,12 @@ Slack slash command (/onboard …)   |   API call (x-api-key header or ?x-api-ke
                             → SNS → slack_notifier_function → Slack incoming webhook
                                     (result posted back into the channel)
 
-Slack / API call (x-api-key header required)
-    → API Gateway (POST /offboard)
-    → authorizer_function
-        └─ key valid → offboarding_function (Lambda)
+Slack slash command (/offboard …)
+    → API Gateway (POST /offboard, no authorizer)
+    → slack_dispatch_function (Lambda)
+        ├─ Slack signature invalid → 401 Unauthorized
+        └─ Slack signature valid → async-invokes offboarding_function; acks Slack in 3s
+                       offboarding_function (Lambda, async)
                            → Bedrock / Claude: extract username + identity confidence from NL request
                                ├─ confidence < 95% → DynamoDB ("Offboard Pending Review")
                                │                    → SNS (manual review alert)
@@ -249,18 +251,13 @@ The `cd.yml` workflow sets `TF_VAR_use_mock_ldap: "true"` by default — flip it
 
 ### 5. Send an onboarding request
 
-```bash
-curl -X POST https://<api_endpoint>/onboard \
-  -H "Content-Type: application/json" \
-  -H "x-api-key: <your_onboarding_api_key>" \
-  -d '{"request": "Please onboard Sarah Chen as a senior data scientist starting Monday"}'
-```
+The `/onboard` route is invoked from Slack and is authenticated by **Slack signing-secret HMAC** — there is no `x-api-key`. To call it directly you must send a valid `X-Slack-Signature` and `X-Slack-Request-Timestamp` computed from your `slack_signing_secret`; see `docs/DEMO_GUIDE.md` (section 4, Option C) for a ready-to-run signed request.
 
 **Responses:**
-- `200` — user created in AD, IT notified
-- `202` — role too ambiguous for auto-provisioning; IT alerted for manual review
+- `200` — accepted; "Working on it…" ack returned, result delivered to Slack
+- `202` — role/department too ambiguous, or department unstated, for auto-provisioning; IT alerted for manual review
 - `400` — Claude could not extract required fields from the request
-- `403` — missing or invalid API key
+- `401` — missing or invalid Slack signature
 - `500` — LDAP or AWS service error
 
 ---
@@ -281,14 +278,7 @@ The app registration in Entra ID needs the `User.ReadWrite.All` application perm
 
 ## Offboarding
 
-Send a `POST /offboard` request with the same `x-api-key` header:
-
-```bash
-curl -X POST https://<api_endpoint>/offboard \
-  -H "Content-Type: application/json" \
-  -H "x-api-key: <your_onboarding_api_key>" \
-  -d '{"request": "Please offboard John Doe"}'
-```
+`/offboard` works exactly like `/onboard`: a Slack slash command fronted by `slack_dispatch_function`, authenticated by **Slack signing-secret HMAC** (no `x-api-key`), with a 3-second ack and the work done asynchronously. In the Slack app set the **Request URL** to `<api_endpoint>/offboard` (no query string). To call it directly, send a valid `X-Slack-Signature` / `X-Slack-Request-Timestamp` — see `docs/DEMO_GUIDE.md` section 4, Option C, with `command=/offboard`.
 
 Claude extracts the username from the natural language request. The offboarding Lambda then disables the AD account (`userAccountControl=514`), removes the user from every group, optionally deprovisions in Entra ID, and logs the event to DynamoDB with status `Offboarded`.
 
@@ -308,7 +298,8 @@ Two GitHub Actions workflows ship with the project.
 | `AWS_SECRET_ACCESS_KEY` | Corresponding secret key |
 | `TF_STATE_BUCKET` | S3 bucket name for Terraform remote state (create once before first apply) |
 | `DIRECTORY_ADMIN_PASSWORD` | Admin password for the AWS Managed Microsoft AD |
-| `ONBOARDING_API_KEY` | API key to protect the onboarding endpoint |
+| `ONBOARDING_API_KEY` | API key protecting the `/offboard` route (and any non-Slack callers) |
+| `SLACK_SIGNING_SECRET` | Slack app signing secret; `slack_dispatch_function` verifies `/onboard` requests against it |
 
 Before enabling the CD workflow, uncomment and configure the S3 backend in `terraform/provider.tf` so Terraform state is shared between runs rather than stored locally on the runner.
 
@@ -321,7 +312,7 @@ Update the badge URLs at the top of this file by replacing `<your-org>/<your-rep
 - **Secrets Manager** — LDAP credentials never appear in environment variables or code
 - **VPC isolation** — the in-VPC Lambdas reach AWS services privately: Interface endpoints for Secrets Manager, SNS, Lambda, Bedrock Runtime, SQS, and SSM, plus a Gateway endpoint for DynamoDB. Traffic never leaves the AWS backbone. (Gateway-endpoint traffic targets the service's public prefix list, so the Lambda security group must allow egress to that prefix list — not just the VPC CIDR.)
 - **Least-privilege IAM** — Lambda role is scoped to specific resource ARNs throughout: Secrets Manager, DynamoDB, SNS, SSM, the notify Lambda function, and the Claude Haiku 4.5 inference profile + foundation-model ARN in Bedrock
-- **API key authentication** — all requests authenticated via a Lambda REQUEST authorizer before reaching the onboarding pipeline
+- **Request authentication** — the `/onboard` route is verified by Slack signing-secret HMAC (timestamp + `X-Slack-Signature`, 5-minute replay window) inside `slack_dispatch_function`; the `/offboard` route is verified the same way. The legacy `x-api-key` authorizer is no longer attached to a route. No shared secret is placed in the request URL
 - **API Gateway throttling** — burst limit of 10 req/s and sustained rate of 5 req/s protect downstream Bedrock and LDAP from runaway callers even with a valid key
 - **Confidence gating** — ambiguous requests are flagged for human review rather than auto-provisioned
 - **Audit trail** — every event (success, failure, pending review, offboarding) writes an immutable DynamoDB record with a UUID partition key; records include role, department, groups assigned/removed, and Claude's confidence score for full post-incident traceability

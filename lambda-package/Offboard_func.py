@@ -13,7 +13,8 @@ Steps:
 
 Supports USE_MOCK_LDAP=true for demo/CI use without a real directory.
 """
-import urllib
+import base64
+import urllib.parse
 import boto3
 import ldap3
 from ldap3 import Server, Connection, ALL, MODIFY_REPLACE
@@ -100,14 +101,34 @@ def _ldap_connect(ldap_server_addr: str, ldap_user: str, ldap_password: str):
 
 
 def _extract_request(event) -> str:
-    raw_body = event.get("body", "")
+    """Pull the natural-language offboarding request out of the event.
+
+    Handles JSON ({"request"|"text"}), Slack slash-command form bodies
+    (command=/offboard&text=...), and base64-wrapped bodies; falls back to the
+    raw body. parse_qs handles percent-decoding and "+" per field (the previous
+    unquote-then-parse order corrupted values containing an encoded & or =).
+    """
+    raw_body = event.get("body", "") or ""
+    if event.get("isBase64Encoded"):
+        try:
+            raw_body = base64.b64decode(raw_body).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            pass
+
     try:
         body_json = json.loads(raw_body)
-        return body_json.get("request") or body_json.get("text") or raw_body
-    except (json.JSONDecodeError, AttributeError):
-        decoded = urllib.parse.unquote_plus(raw_body)
-        parsed = urllib.parse.parse_qs(decoded)
-        return parsed.get("text", [decoded])[0]
+        if isinstance(body_json, dict):
+            value = body_json.get("request") or body_json.get("text")
+            if value:
+                return value
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    parsed = urllib.parse.parse_qs(raw_body)
+    if parsed.get("text"):
+        return parsed["text"][0]
+
+    return raw_body
 
 
 def _parse_offboard_request(free_form_text: str) -> dict:

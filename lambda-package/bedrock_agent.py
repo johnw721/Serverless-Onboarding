@@ -5,10 +5,11 @@ import os
 import time
 from botocore.config import Config
 from botocore.exceptions import ClientError
+from helpers import resolve_department_group, ALL_EMPLOYEES_GROUP
 
 logger = logging.getLogger(__name__)
 
-# ── Bedrock ───────────────────────────────────────────────────────────────────
+# ---- Bedrock ----
 
 MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-haiku-4-5-20251001-v1:0")
 
@@ -23,7 +24,7 @@ def _get_bedrock_client():
     if _bedrock_runtime is None:
         # Bound the call so a hung/throttled model can't run the whole Lambda to
         # its 60s timeout before the callers' fallbacks engage. Worst case per
-        # call is connect_timeout + read_timeout * max_attempts ≈ 5 + 10*2 = 25s,
+        # call is connect_timeout + read_timeout * max_attempts ~ 5 + 10*2 = 25s,
         # leaving budget for the template fallback and the SNS notification.
         _bedrock_runtime = boto3.client(
             "bedrock-runtime",
@@ -58,7 +59,7 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
-# ── Confidence threshold (SSM-backed, TTL-cached) ────────────────────────────
+# ---- Confidence threshold (SSM-backed, TTL-cached) ----
 
 _CONFIDENCE_THRESHOLD_DEFAULT = 0.8
 _CONFIDENCE_THRESHOLD_SSM_PARAM = os.environ.get(
@@ -127,7 +128,7 @@ def get_confidence_threshold() -> float:
         return _CONFIDENCE_THRESHOLD_DEFAULT
 
 
-# ── Offboard confidence threshold (separate SSM param, higher default) ────────
+# ---- Offboard confidence threshold (separate SSM param, higher default) ----
 
 _OFFBOARD_CONFIDENCE_THRESHOLD_DEFAULT = 0.95
 _OFFBOARD_CONFIDENCE_THRESHOLD_SSM_PARAM = os.environ.get(
@@ -179,7 +180,7 @@ def get_offboard_confidence_threshold() -> float:
         return _OFFBOARD_CONFIDENCE_THRESHOLD_DEFAULT
 
 
-# ── Claude functions ──────────────────────────────────────────────────────────
+# ---- Claude functions ----
 
 def parse_onboarding_request(free_form_text: str) -> dict:
     """
@@ -192,7 +193,9 @@ Return a JSON object with exactly these keys:
   "username"   - lowercase first initial + last name (e.g. "jdoe" for John Doe)
   "name"       - full name
   "Role"       - job title exactly as stated, or closest reasonable interpretation
-  "Department" - department name (infer from role if not explicitly stated)
+  "Department" - the department name ONLY if it is explicitly stated in the request.
+                 If the request does not explicitly name a department, use null.
+                 Do NOT infer, guess, or derive the department from the job title.
 
 If a field truly cannot be determined, use null.
 
@@ -212,25 +215,61 @@ Return only valid JSON. No explanation, no markdown."""
 
 def get_group_assignments(user_info: dict, fallback_map: dict) -> dict:
     """
-    Use Claude to determine AD group assignments for a given role/department.
+    Decide which AD security groups an employee should be added to.
 
-    Returns:
-        {
-            "groups":     list[str],
-            "confidence": float,      # 0.0-1.0
-            "reasoning":  str
+    Department-driven: the employee's DEPARTMENT determines their primary group
+    (plus "All Employees"). Job-title keywords are deliberately NOT used to infer
+    a department group -- a "QA Engineer" in Finance must land in Finance, never
+    Engineering. When the department resolves to a known group this is fully
+    deterministic (confidence 1.0) and Claude is not called.
+
+    If no department was specified, the request is routed to manual review
+    (confidence 0.0) rather than guessing. Claude is consulted only when a
+    department was given but does not resolve to a known group.
+
+    Returns: {"groups": list[str], "confidence": float, "reasoning": str}
+    """
+    department = (user_info.get("Department") or "").strip()
+
+    # No department stated -> do not guess; route to manual review.
+    if not department:
+        logger.info("No department specified; routing onboarding to manual review.")
+        return {
+            "groups": [ALL_EMPLOYEES_GROUP],
+            "confidence": 0.0,
+            "reasoning": (
+                "No department was specified in the request, so a department group "
+                "cannot be assigned automatically. Routing to manual review."
+            ),
         }
 
-    Falls back to the hardcoded map on Bedrock error, or to ["All Employees"]
-    with confidence=0.0 if the role is also absent from the map.
+    group = resolve_department_group(department)
+    if group:
+        groups = [group] if group == ALL_EMPLOYEES_GROUP else [group, ALL_EMPLOYEES_GROUP]
+        return {
+            "groups": groups,
+            "confidence": 1.0,
+            "reasoning": (
+                f"Department '{department}' maps to the '{group}' group "
+                f"(department-driven; job title is not used to infer groups)."
+            ),
+        }
+
+    logger.info("Department '%s' did not resolve to a known group; asking Claude.", department)
+    return _claude_group_assignments(user_info, fallback_map)
+
+
+def _claude_group_assignments(user_info: dict, fallback_map: dict) -> dict:
+    """
+    LLM fallback for employees whose department does not resolve to a known group.
+
+    Still department-first: the prompt forbids inferring a group from a keyword in
+    the job title. Falls back to the hardcoded role map on a Bedrock error, or to
+    ["All Employees"] with confidence 0.0 if the role is unknown too.
     """
     role = user_info.get("Role", "")
     department = user_info.get("Department", "")
     all_groups = sorted(set(g for groups in fallback_map.values() for g in groups))
-    examples = "\n".join(
-        f'  "{r}": {json.dumps(groups)}'
-        for r, groups in list(fallback_map.items())[:5]
-    )
 
     prompt = f"""Determine which Active Directory security groups an employee should be added to.
 
@@ -239,19 +278,19 @@ Employee department: "{department}"
 
 Available groups: {json.dumps(all_groups)}
 
-Example mappings for reference:
-{examples}
-
 Rules:
+- Base the decision on the employee's DEPARTMENT, not on keywords in their job title.
+- Never add a department group just because the job title contains that word. For
+  example, a "QA Engineer" in Finance belongs to Finance, NOT Engineering.
 - Always include "All Employees".
-- Prefer the most specific matching group(s).
-- If the role clearly matches one of the examples, confidence should be 0.9-1.0.
-- If the role is ambiguous or novel but inferable, use 0.5-0.89.
-- If you genuinely cannot map the role, use confidence 0.0 and groups ["All Employees"].
+- Pick at most one department group: the one matching the employee's department.
+- If the department clearly matches an available group, confidence 0.9-1.0.
+- If it is ambiguous or novel but inferable, use 0.5-0.89.
+- If you genuinely cannot map the department, use confidence 0.0 and groups ["All Employees"].
 
 Return only valid JSON:
 {{
-  "groups": ["Group A", "Group B"],
+  "groups": ["Group A"],
   "confidence": 0.95,
   "reasoning": "One sentence explaining the decision."
 }}"""
@@ -260,14 +299,14 @@ Return only valid JSON:
         text = _invoke_claude(prompt)
         result = json.loads(_strip_fences(text))
 
-        if "All Employees" not in result.get("groups", []):
-            result.setdefault("groups", []).append("All Employees")
+        if ALL_EMPLOYEES_GROUP not in result.get("groups", []):
+            result.setdefault("groups", []).append(ALL_EMPLOYEES_GROUP)
 
         return result
 
     except Exception as e:
         logger.warning(f"Claude group assignment failed, falling back to hardcoded map: {e}")
-        fallback_groups = fallback_map.get(role, ["All Employees"])
+        fallback_groups = fallback_map.get(role, [ALL_EMPLOYEES_GROUP])
         return {
             "groups": fallback_groups,
             "confidence": 1.0 if role in fallback_map else 0.0,

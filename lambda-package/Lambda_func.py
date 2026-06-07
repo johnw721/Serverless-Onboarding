@@ -1,4 +1,5 @@
-import urllib
+import base64
+import urllib.parse
 import boto3
 import ldap3
 from ldap3 import Server, Connection, ALL
@@ -38,9 +39,9 @@ group_base_dn = os.getenv("GROUP_BASE_DN", base_dn)
 # been provisioned. Useful for demos, CI, and environments without AD.
 USE_MOCK_LDAP = os.getenv("USE_MOCK_LDAP", "false").lower() == "true"
 
-from azure_sync import sync_to_entra  # noqa: E402 — imported after env var is read
+from azure_sync import sync_to_entra  # noqa: E402 - imported after env var is read
 
-# LDAP retry settings — tune via env vars without redeploying
+# LDAP retry settings - tune via env vars without redeploying
 _LDAP_MAX_ATTEMPTS = int(os.getenv("LDAP_MAX_ATTEMPTS", "3"))
 _LDAP_BACKOFF_BASE = float(os.getenv("LDAP_BACKOFF_BASE", "1.0"))
 
@@ -53,14 +54,39 @@ def _fetch_ldap_credentials():
 
 
 def _extract_nl_request(event):
-    raw_body = event.get("body", "")
+    """Pull the natural-language onboarding request out of the API Gateway event.
+
+    Handles the body shapes this API actually receives, and undoes API Gateway
+    base64 wrapping when present:
+      * JSON (programmatic callers / curl):  {"request": "..."} or {"text": "..."}
+      * Slack slash command (form-encoded):  command=/onboard&text=...
+      * anything else: the raw body verbatim.
+    """
+    raw_body = event.get("body", "") or ""
+    if event.get("isBase64Encoded"):
+        try:
+            raw_body = base64.b64decode(raw_body).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            pass
+
+    # Programmatic JSON callers first.
     try:
         body_json = json.loads(raw_body)
-        return body_json.get("request") or body_json.get("text") or raw_body
-    except (json.JSONDecodeError, AttributeError):
-        decoded = urllib.parse.unquote_plus(raw_body)
-        parsed = urllib.parse.parse_qs(decoded)
-        return parsed.get("text", [decoded])[0]
+        if isinstance(body_json, dict):
+            value = body_json.get("request") or body_json.get("text")
+            if value:
+                return value
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    # Slack slash command: application/x-www-form-urlencoded with a `text` field.
+    # parse_qs handles percent-decoding and "+" -> space per field; the previous
+    # unquote-then-parse order corrupted any value containing an encoded & or =.
+    parsed = urllib.parse.parse_qs(raw_body)
+    if parsed.get("text"):
+        return parsed["text"][0]
+
+    return raw_body
 
 
 def _send_sns_notification(subject, message):
@@ -84,7 +110,7 @@ def _ldap_connect(ldap_server_addr: str, ldap_user: str, ldap_password: str):
 
     Retries up to _LDAP_MAX_ATTEMPTS times on connection-level failures
     (network unreachable, timeout, etc.). Authentication errors are not
-    retried — a wrong password will fail immediately on every attempt so
+    retried - a wrong password will fail immediately on every attempt so
     we propagate the exception without sleeping.
 
     Returns a bound ldap3 Connection object.
@@ -108,7 +134,7 @@ def _ldap_connect(ldap_server_addr: str, ldap_user: str, ldap_password: str):
             return conn
         except Exception as e:
             last_exc = e
-            # Don't retry auth errors — wrong password won't fix itself
+            # Don't retry auth errors - wrong password won't fix itself
             err_lower = str(e).lower()
             if "invalid credentials" in err_lower or "unwillingtoperform" in err_lower:
                 logger.error("LDAP authentication error (not retrying): %s", e)
@@ -281,7 +307,7 @@ def lambda_handler(event, context):
         azure_ok, temp_password = sync_to_entra(user_info)
         if not azure_ok:
             logger.warning(
-                "Entra ID sync failed for %s — AD account created but Microsoft 365 "
+                "Entra ID sync failed for %s - AD account created but Microsoft 365 "
                 "access may need manual provisioning.", user_info["username"]
             )
 

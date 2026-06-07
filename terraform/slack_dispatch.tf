@@ -35,16 +35,19 @@ resource "aws_iam_role_policy_attachment" "slack_dispatch_basic" {
 
 # Allowed to invoke only the onboarding worker function.
 resource "aws_iam_role_policy" "slack_dispatch_invoke" {
-  name = "slack-dispatch-invoke-onboarding"
+  name = "slack-dispatch-invoke-workers"
   role = aws_iam_role.slack_dispatch_role.id
 
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Sid      = "InvokeOnboardingWorker"
-      Effect   = "Allow"
-      Action   = "lambda:InvokeFunction"
-      Resource = aws_lambda_function.onboarding_function.arn
+      Sid    = "InvokeWorkers"
+      Effect = "Allow"
+      Action = "lambda:InvokeFunction"
+      Resource = [
+        aws_lambda_function.onboarding_function.arn,
+        aws_lambda_function.offboarding_function.arn,
+      ]
     }]
   })
 }
@@ -63,7 +66,12 @@ resource "aws_lambda_function" "slack_dispatch_function" {
 
   environment {
     variables = {
-      ONBOARDING_FUNCTION_NAME = aws_lambda_function.onboarding_function.function_name
+      # The dispatcher routes /onboard and /offboard to the right worker.
+      ONBOARDING_FUNCTION_NAME  = aws_lambda_function.onboarding_function.function_name
+      OFFBOARDING_FUNCTION_NAME = aws_lambda_function.offboarding_function.function_name
+      # Verifies X-Slack-Signature on every /onboard and /offboard request (the
+      # routes have no API Gateway authorizer anymore).
+      SLACK_SIGNING_SECRET = var.slack_signing_secret
     }
   }
 

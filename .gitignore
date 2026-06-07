@@ -1,4 +1,4 @@
-# ── Python ────────────────────────────────────────────────────
+# ---- Python ----
 .venv/
 **/__pycache__/
 *.pyc
@@ -10,7 +10,7 @@
 pytest-cache-files-*/
 .pytest_cache/
 
-# ── Terraform ─────────────────────────────────────────────────
+# ---- Terraform ----
 # State files contain resource IDs and may contain secret values
 /terraform/terraform.tfstate
 /terraform/terraform.tfstate.backup
@@ -24,7 +24,7 @@ pytest-cache-files-*/
 /terraform/deployed.zip
 /terraform/deployed_check/
 
-# Saved plan files — these embed variable values (incl. secrets) in plaintext
+# Saved plan files - these embed variable values (incl. secrets) in plaintext
 /terraform/main-plan-*
 *.tfplan
 
@@ -36,7 +36,7 @@ pytest-cache-files-*/
 *.tfvars
 *.tfvars.json
 
-# ── Lambda package – pip-installed dependencies ───────────────
+# ---- Lambda package - pip-installed dependencies ----
 # Terraform's null_resource pip-installs all runtime deps into
 # lambda-package/ before zipping. Ignore the entire directory's
 # contents, then re-include only the hand-written source modules
@@ -46,15 +46,16 @@ lambda-package/*
 !lambda-package/*.py
 !lambda-package/requirements.txt
 
-# ── Editors / OS ──────────────────────────────────────────────
+# ---- Editors / OS ----
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
 
-# ── Project-specific scratch (local-only notes & artifacts) ───
+# ---- Project-specific scratch (local-only notes & artifacts) ----
 Artifacts.md
 DEBUG_COMMANDS.md
 DEBUG_SESSION_SUMMARY.md
 image.png
-docs/
+# Session summaries (local-only notes from cowork debugging sessions)
+SESSION_SUMMARY_*.md

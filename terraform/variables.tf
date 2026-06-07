@@ -23,7 +23,13 @@ variable "directory_admin_password" {
 }
 
 variable "onboarding_api_key" {
-  description = "API key callers must supply in the x-api-key header to reach the onboarding endpoint."
+  description = "API key callers must supply in the x-api-key header to reach the offboarding endpoint (and any non-Slack onboarding callers)."
+  type        = string
+  sensitive   = true
+}
+
+variable "slack_signing_secret" {
+  description = "Slack app signing secret (Basic Information page). slack_dispatch_function uses it to verify the X-Slack-Signature on every /onboard request. Pass via a .tfvars file — never commit this value."
   type        = string
   sensitive   = true
 }
