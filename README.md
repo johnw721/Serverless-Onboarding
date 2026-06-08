@@ -7,6 +7,10 @@ An automated employee onboarding system that uses Claude (via AWS Bedrock) to pr
 
 ---
 
+## Demo Video
+
+https://github.com/johnw721/Serverless-Onboarding/blob/main/Screen%20Recording%202026-06-06%20214351.mp4
+
 ## Architecture
 
 ### Components
