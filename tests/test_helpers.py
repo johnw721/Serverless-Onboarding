@@ -61,8 +61,11 @@ class TestValidateEmployeeData(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             validate_employee_data({})
         msg = str(ctx.exception)
-        for field in ("username", "name", "Role", "Department"):
+        for field in ("username", "name", "Role"):
             self.assertIn(field, msg)
+        # Department is intentionally NOT required (routed to manual review),
+        # so it should not appear in the missing-fields error.
+        self.assertNotIn("Department", msg)
 
 
 class TestSanitizeDnValue(unittest.TestCase):
