@@ -687,11 +687,6 @@ resource "aws_directory_service_directory" "ad_directory" {
   name     = "business.abc.com"
   password = aws_secretsmanager_secret_version.directory_admin_password_version.secret_string
   size     = "Small"
-  # Simple AD (Samba 4) costs ~$36-40/month vs ~$87-140/month for Managed Microsoft AD.
-  # All LDAP operations used here (user create, group modify, account disable) work
-  # identically on Simple AD. Switch to "MicrosoftAD" only if trust relationships or
-  # MFA integration are needed.
-  type = "SimpleAD"
 
   vpc_settings {
     vpc_id     = aws_vpc.main.id
