@@ -6,6 +6,10 @@
 *.pyd
 .env
 
+# ---- Documentation Folder ----
+docs/
+
+
 # pytest artifacts (stray cache dirs created on permission-restricted filesystems)
 pytest-cache-files-*/
 .pytest_cache/
