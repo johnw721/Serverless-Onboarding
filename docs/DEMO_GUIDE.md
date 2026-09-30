@@ -14,7 +14,7 @@ macOS/Linux.
 | AWS account with **Amazon Bedrock access to Claude Haiku 4.5** in your region | The onboarding Lambda calls Claude to parse requests. See "Enable the model" below — it's a one-time, per-account step, not a separate account or signup. |
 | **AWS CLI** configured (`aws configure`) | Terraform and the test commands authenticate through it |
 | **Terraform ≥ 1.5** | Provisions all infrastructure |
-| **Slack app** with an **Incoming Webhook** URL | Receives result notifications |
+| **Slack app** with an **Incoming Webhook** URL and its **Signing Secret** | The webhook receives result notifications; the signing secret authenticates `/onboard` and `/offboard` |
 | An **S3 bucket** for Terraform remote state | Backend storage (created once, below) |
 
 > **Regions:** resources deploy to **us-west-2** (the project hardcodes its
@@ -71,15 +71,14 @@ git-ignored — **never commit it**):
 
 ```hcl
 slack_webhook_url        = "https://hooks.slack.com/services/T000/B000/xxxxxxxx"
-directory_admin_password = "Ch00se-A-Str0ng-Passw0rd!"
-onboarding_api_key       = "pick-a-long-random-string"
 slack_signing_secret     = "from-slack-app-basic-information"
+directory_admin_password = "Ch00se-A-Str0ng-Passw0rd!"
 use_mock_ldap            = "true"
 ```
 
 - `slack_webhook_url` — the Incoming Webhook URL **Slack gave you** (outbound: app → Slack).
-- `onboarding_api_key` — any secret; required by the `/offboard` route (sent as `x-api-key`).
-- `slack_signing_secret` — your Slack app's **Signing Secret** (Basic Information -> App Credentials); `slack_dispatch_function` verifies every `/onboard` request against it.
+- `slack_signing_secret` — your Slack app's **Signing Secret** (Basic Information -> App Credentials); `slack_dispatch_function` verifies every `/onboard` and `/offboard` request against it.
+- `directory_admin_password` — admin password for AWS Managed Microsoft AD. Only needed with `use_mock_ldap = "false"`; mock mode creates no directory, so you can leave this line out.
 - `use_mock_ldap = "true"` — skips real Active Directory so the full Claude pipeline runs at **zero directory cost**. Ideal for the demo.
 
 ---
@@ -94,6 +93,18 @@ terraform init `
   -backend-config="region=us-east-1"
 ```
 *Downloads providers and connects to remote state.*
+
+Before the **first** apply on a clean checkout, install the Lambda dependencies
+by hand. `archive_file` is read at plan time, before Terraform's own `pip_install`
+step runs, so the first zip would otherwise be missing them:
+
+```powershell
+cd ..
+pip install -r lambda-package/requirements.txt -t lambda-package/ `
+  --platform manylinux2014_x86_64 --python-version 3.11 --only-binary=:all: --upgrade
+cd terraform
+```
+*`pip install` on its own does nothing; it needs the `-r requirements.txt` part. `--python-version 3.11` matches the Lambda runtime even if your local Python is older.*
 
 ```powershell
 terraform fmt
@@ -114,14 +125,15 @@ terraform plan -out=main-plan-v1
 > terraform plan -out=main-plan-v1 `
 >   -var="use_mock_ldap=true" `
 >   -var="directory_admin_password=..." `
->   -var="onboarding_api_key=..."
+>   -var="slack_signing_secret=..." `
+>   -var="slack_webhook_url=..."
 > ```
 > Either way it flows into the Lambda's `USE_MOCK_LDAP` env var and takes effect on the next `apply`.
 
 ```powershell
 terraform apply main-plan-v1
 ```
-*Provisions everything. Ends with `Apply complete!` and prints outputs. **Screenshot the outputs.***
+*Provisions everything. In mock mode this takes a few minutes. With `use_mock_ldap = "false"`, the first apply takes **20–45 minutes** because AWS Managed Microsoft AD is slow to create (Terraform allows up to 90). Ends with `Apply complete!` and prints outputs. **Screenshot the outputs.***
 
 Grab the values you'll need:
 
@@ -159,9 +171,9 @@ Repeat for the offboard command (same dispatcher + signing-secret auth):
 After `terraform init` and `secrets.auto.tfvars` are in place, run from the project root:
 
 ```powershell
-./demo.ps1 -ApiKey "<your onboarding_api_key>"
+./demo.ps1
 ```
-*Runs plan → apply → fires a sample onboarding request → prints the dashboard URL. Add `-SkipApply` once deployed to just fire a request. Use `-Request "..."` to change the text.*
+*Runs plan → apply → fires a Slack-signed sample onboarding request → prints the dashboard URL. The script reads `slack_signing_secret` from `terraform/secrets.auto.tfvars` and signs the request the way Slack does. Add `-SkipApply` once deployed to just fire a request. Use `-Request "..."` to change the text, and include a department so it isn't routed to review.*
 
 ### Option A — quickest (outbound notification only)
 
@@ -177,7 +189,7 @@ aws sns publish --topic-arn (terraform output -raw notification_topic_arn) `
 In Slack, type:
 
 ```
-/onboard Please onboard Sarah Chen as a Data Scientist starting Monday.
+/onboard Please onboard Sarah Chen as a Data Scientist in the Data Science department, starting Monday.
 ```
 
 You'll see an instant **"⏳ Working on it…"** ack, then a few seconds later the
@@ -198,7 +210,7 @@ $sig = "v0=" + (($h.ComputeHash([Text.Encoding]::UTF8.GetBytes("v0:$ts`:$body"))
 curl.exe -s -X POST "$api/onboard" -H "Content-Type: application/x-www-form-urlencoded" `
   -H "X-Slack-Request-Timestamp: $ts" -H "X-Slack-Signature: $sig" --data $body
 ```
-*Returns the `Working on it…` ack immediately; the result lands in Slack. A bare `x-api-key` call no longer works on `/onboard` — only `/offboard` uses the API key.*
+*Returns the `Working on it…` ack immediately; the result lands in Slack. For offboarding, use `command=/offboard` and post to `$api/offboard`. Unsigned calls get `401`.*
 *More sample payloads (manual-review, validation errors, injection rejection) are in `sample_requests.md`.*
 
 ---
@@ -232,10 +244,11 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 pip install -r lambda-package/requirements.txt
-pip install pytest moto
-python -m pytest -v
+pip install pytest "moto[dynamodb,secretsmanager,ssm,lambda,iam]"
+$env:PYTHONPATH = "lambda-package"
+python -m pytest tests/ -v
 ```
-*Runs unit + end-to-end (moto-mocked AWS) tests in an isolated virtualenv (`.venv/` is git-ignored). Using a venv avoids permission errors when writing console scripts into a system Python install. **Screenshot the green pass summary** — it shows tests, mocking, and CI discipline.*
+*Runs all 65 unit + end-to-end (moto-mocked AWS) tests in an isolated virtualenv (`.venv/` is git-ignored). Using a venv avoids permission errors when writing console scripts into a system Python install. **Screenshot the green pass summary** — it shows tests, mocking, and CI discipline.*
 
 > If you prefer not to use a venv and hit a `py.test.exe` write error, the
 > packages still install correctly — just run tests with `python -m pytest -v`,
@@ -251,6 +264,7 @@ python -m pytest -v
 | **CloudWatch dashboard** | `terraform output -raw dashboard_url`, or CloudWatch → Dashboards → `ad-lambda-overview` | One screen: invocations, errors, p99 latency, throttles, API Gateway traffic/latency, DLQ depth |
 | **Alarms (healthy)** | CloudWatch → Alarms — `onboarding-function-errors`, `onboarding-function-latency-p99`, `notify-sns-dlq-messages` all in **OK** | Shows you design for failure, not just the happy path |
 | **DLQ at zero** | SQS → `notify_dlq` → Monitoring (0 messages) | Confirms reliable async delivery |
+| **API access logs** | CloudWatch → Log groups → `/aws/apigateway/onboarding_api` | Every request with route, status and source IP |
 | **Structured logs** | CloudWatch → Log groups → `/aws/lambda/onboarding_function` — find the line with the confidence score vs. threshold | Observability + the AI decision logic |
 | **Slack result** | Your Slack channel | The user-facing outcome |
 | **Tests passing** | Terminal `pytest` output | Quality engineering signal |
@@ -281,10 +295,16 @@ terraform destroy
 ```
 *Removes all provisioned resources. The S3 state bucket persists; delete it manually if you're fully done.*
 
+If you deployed a **real** directory (`use_mock_ldap = "false"`), it is protected
+with `lifecycle { prevent_destroy = true }` and `destroy` stops with an error.
+Remove that line from `aws_directory_service_directory.ad_directory` in
+`terraform/Infrastructure.tf` first, and put it back afterwards.
+
 ---
 
 ### Cost note
-With `use_mock_ldap = "true"` there is **no** Simple AD running (the single
-biggest cost). What remains — Lambda, API Gateway, SNS, DynamoDB on-demand,
-CloudWatch — is pennies for a short demo. Run `terraform destroy` when finished
-to be safe.
+With `use_mock_ldap = "true"` Terraform creates **no** directory, so the biggest
+cost is gone. What remains — Lambda, API Gateway, SNS, KMS, DynamoDB on-demand,
+CloudWatch — is pennies for a short demo; the VPC interface endpoints bill a
+small hourly fee each, so tear down (section 8) when you're finished. A real
+AWS Managed Microsoft AD (Standard) adds roughly $88/month.

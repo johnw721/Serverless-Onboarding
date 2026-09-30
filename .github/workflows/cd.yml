@@ -15,7 +15,8 @@ env:
   AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
   AWS_DEFAULT_REGION: us-west-2
   TF_VAR_directory_admin_password: ${{ secrets.DIRECTORY_ADMIN_PASSWORD }}
-  TF_VAR_onboarding_api_key: ${{ secrets.ONBOARDING_API_KEY }}
+  TF_VAR_slack_signing_secret: ${{ secrets.SLACK_SIGNING_SECRET }}
+  TF_VAR_slack_webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
   # Flip to "true" to run the pipeline end-to-end without a real AD directory.
   # Remove or set to "false" once real LDAP credentials are in Secrets Manager.
   TF_VAR_use_mock_ldap: "true"
@@ -67,7 +68,7 @@ jobs:
 
       - name: Terraform Init
         working-directory: terraform
-        run: terraform init -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" -backend-config="region=us-west-2"
+        run: terraform init -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" -backend-config="region=us-east-1"
 
       - name: Terraform Validate
         working-directory: terraform
@@ -132,7 +133,7 @@ jobs:
 
       - name: Terraform Init
         working-directory: terraform
-        run: terraform init -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" -backend-config="region=us-west-2"
+        run: terraform init -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" -backend-config="region=us-east-1"
 
       - name: Terraform Apply
         working-directory: terraform

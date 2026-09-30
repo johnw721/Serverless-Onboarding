@@ -6,9 +6,6 @@
 *.pyd
 .env
 
-# ---- Documentation Folder ----
-docs/
-
 
 # pytest artifacts (stray cache dirs created on permission-restricted filesystems)
 pytest-cache-files-*/
@@ -23,6 +20,9 @@ pytest-cache-files-*/
 
 # Generated Lambda deployment artifact
 /terraform/lambda_function.zip
+/terraform/lambda_function.zip.sha256
+/terraform/fixed
+/terraform/updated_ad
 
 # Debug artifacts (downloaded copy of the deployed function for inspection)
 /terraform/deployed.zip

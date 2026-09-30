@@ -2,6 +2,17 @@
 ### to specific ARNs without hardcoding the account number.
 data "aws_caller_identity" "current" {}
 
+### The AD domain name is a known literal. Keeping it in a local (instead of
+### referencing aws_directory_service_directory.ad_directory.name) means the
+### Lambdas and API Gateway no longer wait ~30+ min for the directory to finish.
+locals {
+  ad_domain = "business.abc.com"
+
+  # Mock mode never touches LDAP, so it doesn't need a directory. Skipping it
+  # saves ~$88/month and 20-45 minutes on every fresh apply.
+  create_directory = lower(var.use_mock_ldap) != "true"
+}
+
 ### ============================================================
 ### VPC & Networking
 ### ============================================================
@@ -34,18 +45,19 @@ resource "aws_security_group" "lambda_sg" {
   vpc_id      = aws_vpc.main.id
 }
 
-### Allow all egress within the VPC (reaches the interface VPC endpoints and the AD directory)
+### Allow all egress within the VPC (reaches the interface VPC endpoints and the AD directory).
+### Uses the VPC's actual CIDR so it can never drift from a separately-set variable.
 resource "aws_security_group_rule" "lambda_egress_vpc" {
   type              = "egress"
   from_port         = 0
   to_port           = 0
   protocol          = "-1"
   security_group_id = aws_security_group.lambda_sg.id
-  cidr_blocks       = [var.vpc_cidr_block]
+  cidr_blocks       = [aws_vpc.main.cidr_block]
   description       = "Allow Lambda to reach VPC interface endpoints and AD"
 }
 
-### DynamoDB (and S3) use a GATEWAY endpoint, whose traffic is routed to the
+### DynamoDB (and S3) use a GATEWAY endpoint (Interface endpoints are also an option), whose traffic is routed to the
 ### service's public prefix list — addresses OUTSIDE the VPC CIDR. The egress
 ### rule above (VPC CIDR only) therefore blocks it, causing a connect timeout to
 ### dynamodb.<region>.amazonaws.com. Allow egress to the gateway prefix list.
@@ -81,12 +93,17 @@ resource "aws_security_group_rule" "endpoint_ingress_from_lambda" {
 ### ============================================================
 ### VPC Interface Endpoints (keep Lambda off the public internet)
 ### ============================================================
+### Interface endpoints are placed in BOTH subnets/AZs so the Lambdas keep
+### access to AWS services if one AZ has problems.
+###
+### No SQS endpoint: the DLQ on notify_sns_function is written by the Lambda
+### service itself (using the execution role), not by function code inside the VPC.
 
 resource "aws_vpc_endpoint" "secretsmanager_endpoint" {
   vpc_id              = aws_vpc.main.id
   service_name        = "com.amazonaws.us-west-2.secretsmanager"
   vpc_endpoint_type   = "Interface"
-  subnet_ids          = [aws_subnet.foo.id]
+  subnet_ids          = [aws_subnet.foo.id, aws_subnet.bar.id]
   security_group_ids  = [aws_security_group.vpc_endpoint_sg.id]
   private_dns_enabled = true
 }
@@ -104,7 +121,7 @@ resource "aws_vpc_endpoint" "sns_endpoint" {
   vpc_id              = aws_vpc.main.id
   service_name        = "com.amazonaws.us-west-2.sns"
   vpc_endpoint_type   = "Interface"
-  subnet_ids          = [aws_subnet.foo.id]
+  subnet_ids          = [aws_subnet.foo.id, aws_subnet.bar.id]
   security_group_ids  = [aws_security_group.vpc_endpoint_sg.id]
   private_dns_enabled = true
 }
@@ -114,7 +131,7 @@ resource "aws_vpc_endpoint" "lambda_endpoint" {
   vpc_id              = aws_vpc.main.id
   service_name        = "com.amazonaws.us-west-2.lambda"
   vpc_endpoint_type   = "Interface"
-  subnet_ids          = [aws_subnet.foo.id]
+  subnet_ids          = [aws_subnet.foo.id, aws_subnet.bar.id]
   security_group_ids  = [aws_security_group.vpc_endpoint_sg.id]
   private_dns_enabled = true
 }
@@ -124,17 +141,7 @@ resource "aws_vpc_endpoint" "bedrock_endpoint" {
   vpc_id              = aws_vpc.main.id
   service_name        = "com.amazonaws.us-west-2.bedrock-runtime"
   vpc_endpoint_type   = "Interface"
-  subnet_ids          = [aws_subnet.foo.id]
-  security_group_ids  = [aws_security_group.vpc_endpoint_sg.id]
-  private_dns_enabled = true
-}
-
-### Needed for notify_sns_function to write to its DLQ from within the VPC
-resource "aws_vpc_endpoint" "sqs_endpoint" {
-  vpc_id              = aws_vpc.main.id
-  service_name        = "com.amazonaws.us-west-2.sqs"
-  vpc_endpoint_type   = "Interface"
-  subnet_ids          = [aws_subnet.foo.id]
+  subnet_ids          = [aws_subnet.foo.id, aws_subnet.bar.id]
   security_group_ids  = [aws_security_group.vpc_endpoint_sg.id]
   private_dns_enabled = true
 }
@@ -146,7 +153,7 @@ resource "aws_vpc_endpoint" "ssm_endpoint" {
   vpc_id              = aws_vpc.main.id
   service_name        = "com.amazonaws.us-west-2.ssm"
   vpc_endpoint_type   = "Interface"
-  subnet_ids          = [aws_subnet.foo.id]
+  subnet_ids          = [aws_subnet.foo.id, aws_subnet.bar.id]
   security_group_ids  = [aws_security_group.vpc_endpoint_sg.id]
   private_dns_enabled = true
 }
@@ -220,6 +227,14 @@ resource "aws_iam_policy" "lambda_policy" {
         Resource = [aws_sns_topic.notification_topic.arn]
       },
       {
+        # The SNS topic is encrypted with a customer-managed KMS key; publishers
+        # need these permissions on the key or sns:Publish fails with KMS AccessDenied.
+        Sid      = "KMSForEncryptedSNSTopic"
+        Effect   = "Allow"
+        Action   = ["kms:GenerateDataKey", "kms:Decrypt"]
+        Resource = [aws_kms_key.sns_topic_key.arn]
+      },
+      {
         Sid    = "InvokeNotifySNSLambda"
         Effect = "Allow"
         Action = ["lambda:InvokeFunction"]
@@ -240,6 +255,7 @@ resource "aws_iam_policy" "lambda_policy" {
         ]
       },
       {
+        # Used by the Lambda service to deliver failed async events to the DLQ.
         Sid      = "SQSSendDLQ"
         Effect   = "Allow"
         Action   = ["sqs:SendMessage"]
@@ -271,6 +287,9 @@ resource "aws_iam_role_policy_attachment" "lambda_role_custom" {
 ### Secrets Manager
 ### ============================================================
 
+### NOTE: set ldap_server_address to one of the directory's DNS IPs (see the
+### ad_dns_ip_addresses output), not the domain name. The VPC uses
+### AmazonProvidedDNS, which cannot resolve business.abc.com.
 resource "aws_secretsmanager_secret" "ldap_server_address" {
   name                    = "ldap_server_address"
   recovery_window_in_days = 0
@@ -309,6 +328,7 @@ resource "aws_secretsmanager_secret" "directory_admin_password" {
 }
 
 resource "aws_secretsmanager_secret_version" "directory_admin_password_version" {
+  count         = local.create_directory ? 1 : 0
   secret_id     = aws_secretsmanager_secret.directory_admin_password.id
   secret_string = var.directory_admin_password
 }
@@ -321,6 +341,10 @@ resource "aws_secretsmanager_secret_version" "directory_admin_password_version" 
 ### Install pip dependencies into the lambda-package directory before zipping.
 ### Run: pip install -r ../lambda-package/requirements.txt -t ../lambda-package/
 ### Note: must be run on Linux x86_64 (or use --platform manylinux) to match Lambda runtime.
+###
+### FIRST APPLY ON A CLEAN CHECKOUT: archive_file below is read at plan time,
+### before this null_resource runs, so the first zip can be missing deps.
+### Run the pip install command above manually once before the first apply.
 resource "null_resource" "pip_install" {
   triggers = {
     requirements = filemd5("${path.module}/../lambda-package/requirements.txt")
@@ -370,7 +394,7 @@ resource "aws_lambda_function" "onboarding_function" {
 
   environment {
     variables = {
-      DOMAIN                         = aws_directory_service_directory.ad_directory.name
+      DOMAIN                         = local.ad_domain
       BASE_DN                        = "DC=business,DC=abc,DC=com"
       DYNAMODB_TABLE_NAME            = aws_dynamodb_table.onboarding_request_table.name
       SNS_TOPIC_ARN                  = aws_sns_topic.notification_topic.arn
@@ -424,7 +448,6 @@ resource "aws_lambda_function" "notify_sns_function" {
 }
 
 
-
 ### Offboarding Lambda
 resource "aws_lambda_function" "offboarding_function" {
   filename         = data.archive_file.lambda_zip.output_path
@@ -442,7 +465,7 @@ resource "aws_lambda_function" "offboarding_function" {
 
   environment {
     variables = {
-      DOMAIN                                  = aws_directory_service_directory.ad_directory.name
+      DOMAIN                                  = local.ad_domain
       BASE_DN                                 = "DC=business,DC=abc,DC=com"
       GROUP_BASE_DN                           = "OU=Groups,DC=business,DC=abc,DC=com"
       DYNAMODB_TABLE_NAME                     = aws_dynamodb_table.onboarding_request_table.name
@@ -466,33 +489,10 @@ resource "aws_lambda_permission" "apigw_invoke_offboarding" {
   source_arn    = "${aws_apigatewayv2_api.onboarding_api.execution_arn}/*"
 }
 
-### API key authorizer Lambda
-resource "aws_lambda_function" "authorizer_function" {
-  filename         = data.archive_file.lambda_zip.output_path
-  function_name    = "onboarding_authorizer"
-  role             = aws_iam_role.lambda_role.arn
-  handler          = "api_authorizer.lambda_handler"
-  runtime          = var.lambda_runtime
-  source_code_hash = data.archive_file.lambda_zip.output_base64sha256
-  timeout          = 5
+### (Removed: the x-api-key authorizer Lambda, its API Gateway authorizer and
+### invoke permission. No route used it — auth is the Slack signature check
+### inside slack_dispatch_function.)
 
-  environment {
-    variables = {
-      ONBOARDING_API_KEY = var.onboarding_api_key
-    }
-  }
-
-  depends_on = [aws_iam_role_policy_attachment.lambda_role_basic]
-}
-
-### Allow API Gateway to invoke the authorizer Lambda
-resource "aws_lambda_permission" "apigw_invoke_authorizer" {
-  statement_id  = "AllowAPIGatewayInvokeAuthorizer"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.authorizer_function.function_name
-  principal     = "apigateway.amazonaws.com"
-  source_arn    = "${aws_apigatewayv2_api.onboarding_api.execution_arn}/*"
-}
 
 ### ============================================================
 ### API Gateway
@@ -503,26 +503,6 @@ resource "aws_apigatewayv2_api" "onboarding_api" {
   protocol_type = "HTTP"
 }
 
-
-### Lambda REQUEST authorizer — validates x-api-key on every request.
-### identity_sources is intentionally empty: with any source listed, HTTP API
-### returns 401 WITHOUT invoking the authorizer when that source is absent.
-### Slack slash commands can't send headers (they pass ?x-api-key= in the query
-### string), so a header identity source would 401 every Slack request before
-### our code runs. With no identity source, the authorizer is invoked on every
-### request and api_authorizer.py checks both the header and the query string.
-resource "aws_apigatewayv2_authorizer" "api_key_authorizer" {
-  api_id                            = aws_apigatewayv2_api.onboarding_api.id
-  authorizer_type                   = "REQUEST"
-  authorizer_uri                    = aws_lambda_function.authorizer_function.invoke_arn
-  name                              = "api_key_authorizer"
-  enable_simple_responses           = true
-  authorizer_payload_format_version = "2.0"
-  identity_sources                  = []
-  authorizer_result_ttl_in_seconds  = 0 # caching requires an identity source; disable it
-}
-
-### Use Lambda resource policy (aws_lambda_permission above) instead of IAM credentials
 ### The /onboard route targets the thin slack_dispatch_function (defined in
 ### slack_dispatch.tf), which acks Slack within 3s and async-invokes
 ### onboarding_function. onboarding_function itself is unchanged.
@@ -533,24 +513,22 @@ resource "aws_apigatewayv2_integration" "lambda_integration" {
   depends_on       = [aws_lambda_function.slack_dispatch_function]
 }
 
-### No API Gateway authorizer on /onboard OR /offboard: slack_dispatch_function
+### No API Gateway auth on /onboard OR /offboard: slack_dispatch_function
 ### authenticates the caller itself by verifying the Slack signing-secret HMAC
-### over the raw body (X-Slack-Signature). The old x-api-key authorizer broke on
-### every key rotation and leaked the key into URL/access logs. Both routes are
-### authorization_type = "NONE" and front the dispatcher; the dispatcher rejects
+### over the raw body (X-Slack-Signature). Slack cannot sign requests with AWS
+### SigV4, so AWS_IAM here would 403 every Slack request before the dispatcher
+### runs. Both routes are authorization_type = "NONE"; the dispatcher rejects
 ### anything without a valid Slack signature.
 resource "aws_apigatewayv2_route" "onboarding_route" {
   api_id             = aws_apigatewayv2_api.onboarding_api.id
   route_key          = "POST /onboard"
   target             = "integrations/${aws_apigatewayv2_integration.lambda_integration.id}"
-  authorization_type = "NONE"
+  authorization_type = "NONE" # Slack dispatch function verifies the Slack signature
 }
 
 # /offboard, like /onboard, is fronted by the thin slack_dispatch_function: it
 # verifies the Slack signing-secret HMAC, acks Slack within 3s, and async-invokes
-# offboarding_function. The integration therefore targets the dispatcher, and the
-# route has no API Gateway authorizer (auth is the Slack signature inside the
-# dispatcher). The dispatcher picks the worker from the request path.
+# offboarding_function. The dispatcher picks the worker from the request path.
 resource "aws_apigatewayv2_integration" "offboard_integration" {
   api_id           = aws_apigatewayv2_api.onboarding_api.id
   integration_type = "AWS_PROXY"
@@ -562,23 +540,41 @@ resource "aws_apigatewayv2_route" "offboarding_route" {
   api_id             = aws_apigatewayv2_api.onboarding_api.id
   route_key          = "POST /offboard"
   target             = "integrations/${aws_apigatewayv2_integration.offboard_integration.id}"
-  authorization_type = "NONE"
+  authorization_type = "NONE" # Slack dispatch function verifies the Slack signature
 }
 
 resource "aws_apigatewayv2_stage" "default" {
   api_id      = aws_apigatewayv2_api.onboarding_api.id
   name        = "$default"
   auto_deploy = true
+  access_log_settings {
+    destination_arn = aws_cloudwatch_log_group.api_gateway_logs.arn
+    format = jsonencode({
+      requestId         = "$context.requestId"
+      requestTime       = "$context.requestTime"
+      httpMethod        = "$context.httpMethod"
+      routeKey          = "$context.routeKey"
+      status            = "$context.status"
+      responseLength    = "$context.responseLength"
+      integrationStatus = "$context.integrationStatus"
+      sourceIp          = "$context.identity.sourceIp"
+      userAgent         = "$context.identity.userAgent"
+    })
+  }
 
   # Throttle all routes: burst of 10 req/s, sustained 5 req/s.
-  # Protects downstream Bedrock and LDAP from runaway callers even with a
-  # valid API key. Tune via a new stage deployment — no Lambda redeployment needed.
+  # Protects downstream Bedrock and LDAP from runaway callers, including
+  # validly-signed ones. Tune via the stage — no Lambda redeployment needed.
   default_route_settings {
     throttling_burst_limit = 10
     throttling_rate_limit  = 5
   }
 }
 
+resource "aws_cloudwatch_log_group" "api_gateway_logs" {
+  name              = "/aws/apigateway/onboarding_api"
+  retention_in_days = 14
+}
 
 ### ============================================================
 ### DynamoDB — Onboarding Audit Log
@@ -648,9 +644,39 @@ resource "aws_cloudwatch_metric_alarm" "notify_dlq_alarm" {
 ### ============================================================
 
 resource "aws_sns_topic" "notification_topic" {
-  name = "notification_topic"
+  name              = "notification_topic"
+  kms_master_key_id = aws_kms_key.sns_topic_key.arn
 }
 
+### Key policy: the root statement keeps IAM in control (so the Lambda role's
+### KMSForEncryptedSNSTopic statement takes effect), and the CloudWatch statement
+### lets the DLQ alarm publish to the encrypted topic. The default key policy
+### does not allow CloudWatch, so alarm notifications would be silently dropped.
+resource "aws_kms_key" "sns_topic_key" {
+  description             = "KMS key for SNS topic encryption"
+  deletion_window_in_days = 7
+  enable_key_rotation     = true
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "EnableIAMPolicies"
+        Effect    = "Allow"
+        Principal = { AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root" }
+        Action    = "kms:*"
+        Resource  = "*"
+      },
+      {
+        Sid       = "AllowCloudWatchAlarmsToPublish"
+        Effect    = "Allow"
+        Principal = { Service = "cloudwatch.amazonaws.com" }
+        Action    = ["kms:Decrypt", "kms:GenerateDataKey*"]
+        Resource  = "*"
+      }
+    ]
+  })
+}
 
 ### ============================================================
 ### SSM Parameters
@@ -683,10 +709,16 @@ resource "aws_ssm_parameter" "offboard_confidence_threshold" {
 ### AWS Managed Microsoft AD
 ### ============================================================
 
+### Creation normally takes ~20-45 min (two domain controllers across two AZs).
+### `size` is omitted: it only applies to SimpleAD/ADConnector. For MicrosoftAD,
+### capacity is set by `edition` (Standard is the smaller/cheaper option).
+### Only created when use_mock_ldap is not "true" (see local.create_directory).
 resource "aws_directory_service_directory" "ad_directory" {
-  name     = "business.abc.com"
-  password = aws_secretsmanager_secret_version.directory_admin_password_version.secret_string
-  size     = "Small"
+  count    = local.create_directory ? 1 : 0
+  name     = local.ad_domain
+  type     = "MicrosoftAD"
+  password = aws_secretsmanager_secret_version.directory_admin_password_version[0].secret_string
+  edition  = "Standard"
 
   vpc_settings {
     vpc_id     = aws_vpc.main.id
@@ -695,6 +727,21 @@ resource "aws_directory_service_directory" "ad_directory" {
 
   tags = {
     Project = "AD_Lambda_Onboarding"
+  }
+
+  timeouts {
+    create = "90m" # provider default is 60m; slow creations occasionally exceed it
+  }
+
+  lifecycle {
+    # Recreating the directory costs another ~30+ min. Remove this line
+    # before intentionally running `terraform destroy`.
+    prevent_destroy = true
+
+    precondition {
+      condition     = length(var.directory_admin_password) >= 8
+      error_message = "directory_admin_password must be set (8+ characters) when use_mock_ldap is not \"true\"."
+    }
   }
 }
 
@@ -717,8 +764,13 @@ output "sns_topic_arn" {
 }
 
 output "ad_dns_name" {
-  description = "DNS name of the Active Directory — use as ldap_server_address secret value"
-  value       = aws_directory_service_directory.ad_directory.name
+  description = "Domain name of the Active Directory (not resolvable via AmazonProvidedDNS — use ad_dns_ip_addresses for LDAP). Null in mock mode."
+  value       = one(aws_directory_service_directory.ad_directory[*].name)
+}
+
+output "ad_dns_ip_addresses" {
+  description = "Domain controller / DNS IPs of the Active Directory — use one of these as the ldap_server_address secret value. Null in mock mode."
+  value       = one(aws_directory_service_directory.ad_directory[*].dns_ip_addresses)
 }
 
 output "notify_dlq_arn" {

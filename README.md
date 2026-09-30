@@ -5,6 +5,8 @@
 
 An automated employee onboarding system that uses Claude (via AWS Bedrock) to process natural language requests and provision Active Directory accounts with appropriate permissions based on role and department.
 
+**Status (v1):** deployed and demoed in mock-LDAP mode (the full Slack → Claude → audit → Slack pipeline, with directory writes logged instead of executed). Real-directory mode is wired up but not yet verified end to end against AWS Managed Microsoft AD.
+
 ---
 
 ## Demo Video
@@ -17,8 +19,7 @@ https://github.com/johnw721/Serverless-Onboarding/blob/main/Screen%20Recording%2
 
 | Service | Role |
 |---|---|
-| **API Gateway (HTTP API)** | Receives onboarding POST requests from Slack/Teams |
-| **AWS Lambda – authorizer_function** | Legacy `x-api-key` REQUEST authorizer. No longer attached to a route — both `/onboard` and `/offboard` authenticate via Slack signing-secret HMAC in `slack_dispatch_function`. Kept for optional non-Slack API-key access |
+| **API Gateway (HTTP API)** | Receives `/onboard` and `/offboard` POSTs from Slack slash commands; writes JSON access logs to CloudWatch |
 | **AWS Lambda – slack_dispatch_function** | Fronts the `/onboard` and `/offboard` routes; verifies the Slack signing secret, returns a 3s ack, and async-invokes the matching worker (onboarding or offboarding) |
 | **AWS Lambda – onboarding_function** | Orchestrates the full onboarding pipeline |
 | **AWS Lambda – offboarding_function** | Disables AD account, revokes group membership, logs activity |
@@ -26,12 +27,13 @@ https://github.com/johnw721/Serverless-Onboarding/blob/main/Screen%20Recording%2
 | **AWS Lambda – slack_notifier_function** | Subscribed to SNS; posts notifications to a Slack incoming webhook (runs outside the VPC for internet egress) |
 | **CloudWatch Dashboard** | `ad-lambda-overview` — single-pane invocations, errors, latency, throttles, and DLQ depth |
 | **Claude Haiku 4.5 (AWS Bedrock)** | Parses NL requests and writes notifications; assigns AD groups only as a fallback when a department cannot be resolved deterministically (via the US cross-region inference profile) |
-| **AWS Simple AD** | Target directory; users and groups created/disabled via LDAP |
+| **AWS Managed Microsoft AD (Standard)** | Target directory; users and groups created/disabled over LDAPS |
 | **Microsoft Entra ID (optional)** | Synced via Graph API after AD provisioning/offboarding |
 | **SSM Parameter Store** | Stores the confidence threshold; adjustable without redeployment |
 | **Secrets Manager** | Stores LDAP and Azure credentials securely |
 | **DynamoDB** | Append-only audit log of every onboarding/offboarding event with full context |
-| **SNS** | Delivers notifications to IT team and hiring managers |
+| **SNS** | Delivers notifications to IT team and hiring managers; encrypted with a customer-managed **KMS** key |
+| **SQS** | Dead-letter queue for failed async `notify_sns_function` invocations |
 | **Terraform** | Provisions all infrastructure as code |
 
 ### Data Flow
@@ -96,13 +98,21 @@ Slack slash commands require an HTTP response within 3 seconds, but the onboardi
 
 `onboarding_function`, `offboarding_function`, and `notify_sns_function` run inside a private VPC with no public egress (they reach AWS services through VPC interface endpoints only). Slack's incoming webhook lives on the public internet, so `slack_notifier_function` runs **outside** the VPC and subscribes to the SNS topic. SNS decouples the in-VPC publishers from the internet-facing delivery function. The webhook URL is stored as an SSM `SecureString` (decrypted at runtime), never as a plaintext environment variable or in Terraform state.
 
-### Why AWS Simple AD over EC2-based AD or Managed Microsoft AD?
+### Why AWS Managed Microsoft AD?
 
-Higher availability than self-managed, automated patching, and no Windows Server maintenance — the same operational benefits as AWS Managed Microsoft AD, at roughly a third of the cost (~$36–40/month for the Small tier vs. ~$87–140/month for Managed Microsoft AD Standard/Enterprise).
+The directory started as AWS Simple AD (about $36/month) and moved to AWS Managed Microsoft AD, Standard edition (roughly $88/month for the two domain controllers AWS runs across two AZs; check current pricing for your region). The reasons:
 
-Simple AD is Samba 4-based and lacks some Microsoft-specific features (trust relationships with on-premises AD, MFA integration, PowerShell AD module support). None of those features are exercised here — all three LDAP operations in this system (user creation, group membership modification, account disable) work identically on Simple AD. The savings are real; the trade-off isn't.
+- **LDAPS.** The Lambdas bind with `use_ssl=True`. Simple AD doesn't support LDAPS; Managed Microsoft AD does once a certificate is configured.
+- **Real Active Directory behavior.** Managed Microsoft AD is actual Windows Server AD, so `userAccountControl`, group membership and password policy behave the way they would in a customer's environment instead of through Samba 4 emulation.
+- **Still fully managed.** AWS handles patching, backups and multi-AZ availability; there's no Windows Server to maintain.
 
-The mock LDAP layer (`USE_MOCK_LDAP=true`) remains in place for CI and demos, so the full Claude pipeline runs at zero directory cost in any environment where real AD provisioning isn't needed.
+Two operational notes:
+
+- The directory is only created when `use_mock_ldap` is not `"true"`. Mock mode (the default) skips it entirely, so a demo stack costs pennies and applies in minutes.
+- When it is created, it takes about 20–45 minutes (Terraform's create timeout is raised to 90 minutes). The Lambdas take the domain name from a Terraform `local` rather than from the directory resource, so they don't wait on it.
+- The directory has `lifecycle { prevent_destroy = true }` because recreating it costs another half hour. Remove that line before an intentional `terraform destroy` or before switching a deployed stack back to mock mode.
+
+The mock LDAP layer (`USE_MOCK_LDAP=true`) stays in place for CI and demos, so the full Claude pipeline runs without touching a directory.
 
 ### Confidence thresholds (onboarding and offboarding)
 
@@ -162,38 +172,42 @@ Every event — onboarding, offboarding, pending review, or failure — writes o
 
 ```
 /
-├── .github/
-│   └── workflows/
-│       ├── ci.yml           # Run pytest on every push and PR
-│       └── cd.yml           # Terraform plan on PR; apply on merge to main
+├── .github/workflows/
+│   ├── ci.yml                 # pytest on every push and PR
+│   └── cd.yml                 # tests → terraform plan (PR comment) / apply (push to main)
 ├── lambda-package/
-│   ├── Lambda_func.py       # Onboarding Lambda handler
-│   ├── Offboard_func.py     # Offboarding Lambda handler
-│   ├── bedrock_agent.py     # Claude integration: parsing, group assignment, notifications
-│   ├── azure_sync.py        # Entra ID sync via Microsoft Graph API (optional)
-│   ├── helpers.py           # Validation, DynamoDB logging, shared maps
-│   ├── Notify_SNS.py        # SNS Lambda handler (async, decoupled)
-│   ├── slack_dispatch.py    # Fast 3s ack; async-invokes the onboarding worker
-│   ├── slack_notifier.py    # SNS → Slack incoming webhook delivery (outside VPC)
-│   ├── api_authorizer.py    # API Gateway REQUEST authorizer (x-api-key validation)
-│   └── requirements.txt     # ldap3, boto3, requests
+│   ├── slack_dispatch.py      # Verifies the Slack signature, 3s ack, async-invokes the right worker
+│   ├── Lambda_func.py         # Onboarding worker
+│   ├── Offboard_func.py       # Offboarding worker
+│   ├── bedrock_agent.py       # Claude integration: parsing, group assignment, notifications
+│   ├── helpers.py             # Validation, DN sanitizing, department → group map, DynamoDB logging
+│   ├── azure_sync.py          # Entra ID sync via Microsoft Graph API (optional)
+│   ├── Notify_SNS.py          # Async SNS publisher
+│   ├── slack_notifier.py      # SNS → Slack incoming webhook (runs outside the VPC)
+│   └── requirements.txt       # boto3, ldap3
 ├── terraform/
-│   ├── Infrastructure.tf    # Core AWS resources (VPC, API GW, Lambdas, SNS, DynamoDB, AD)
-│   ├── slack_dispatch.tf    # Dispatcher Lambda + least-privilege role + route permission
-│   ├── slack_notify.tf      # Slack notifier Lambda, SSM SecureString, SNS subscription
-│   ├── dashboard.tf         # CloudWatch dashboard (ad-lambda-overview)
-│   ├── alarms.tf            # CloudWatch alarms: onboarding errors + p99 latency
-│   ├── variables.tf         # Input variables (region, CIDRs, runtime, secrets, mock flag)
-│   └── provider.tf          # AWS provider + commented S3 remote state backend
-├── tests/
-│   ├── test_helpers.py      # Unit tests for validate_employee_data + sanitize_dn_value
-│   └── test_bedrock_agent.py # Unit tests for all three Claude functions (mocked)
-├── demo.ps1                 # One-shot demo driver: plan → apply → fire request → print dashboard URL
+│   ├── Infrastructure.tf      # VPC + endpoints, IAM, Lambdas, API Gateway, SNS + KMS, DynamoDB, SQS DLQ + alarm, SSM, Managed Microsoft AD
+│   ├── slack_dispatch.tf      # Dispatcher Lambda, least-privilege role, route permissions
+│   ├── slack_notify.tf        # Slack notifier Lambda, webhook SecureString, SNS subscription
+│   ├── dashboard.tf           # CloudWatch dashboard (ad-lambda-overview)
+│   ├── alarms.tf              # Alarms: onboarding errors, p99 latency
+│   ├── variables.tf           # Region, runtime, secrets, mock flag, confidence thresholds
+│   └── provider.tf            # AWS provider + S3 backend (bucket and region passed at init)
+├── tests/                     # 65 tests
+│   ├── test_helpers.py        # Validation and DN sanitizing
+│   ├── test_bedrock_agent.py  # Claude functions (Bedrock mocked)
+│   ├── test_lambda_handler.py # Onboarding handler paths
+│   ├── test_offboard_handler.py # Offboarding handler paths
+│   ├── test_azure_sync.py     # Graph API sync (mocked)
+│   └── test_e2e_moto.py       # End to end against moto-mocked AWS
 ├── docs/
-│   ├── DEMO_GUIDE.md        # Full runbook: setup → demo → artifacts → video script
-│   ├── LEARNING_LESSONS.md  # Build notes & lessons learned
-│   └── sample_requests.md   # Sample Slack payloads (happy path, manual-review, validation, injection)
-├── .gitignore
+│   ├── DEMO_GUIDE.md          # Full runbook: setup → Slack → demo → troubleshooting → teardown
+│   ├── sample_requests.md     # Signed sample requests (happy path, manual review, bad input, injection)
+│   ├── LEARNING_LESSONS.md    # Build notes and lessons learned
+│   ├── runbooks/DLQ-Runbook.md
+│   └── incidents/INC-2026-001-DLQ-FIRED.md
+├── demo.ps1                   # One-shot demo driver: plan → apply → signed request → dashboard URL
+├── LICENSE
 └── README.md
 ```
 
@@ -201,68 +215,80 @@ Every event — onboarding, offboarding, pending review, or failure — writes o
 
 ## Setup & Deployment
 
+The full walkthrough, including Slack app setup and troubleshooting, is in [docs/DEMO_GUIDE.md](docs/DEMO_GUIDE.md). The short version:
+
 ### Prerequisites
 
-- AWS account with Bedrock access to Claude Haiku 4.5 in `us-west-2` (Anthropic models need a one-time AWS Marketplace subscription — see docs/DEMO_GUIDE.md "Enable the model")
-- Terraform ≥ 1.5
-- Python 3.11 + pip (must be Linux x86\_64 for Lambda-compatible binaries — use Docker if on Mac/Windows ARM)
+- AWS account with Bedrock access to Claude Haiku 4.5 in `us-west-2` (Anthropic models need a one-time AWS Marketplace subscription; see DEMO_GUIDE "Enable the model")
+- Terraform ≥ 1.5 and the AWS CLI
+- Python 3.11 + pip
+- A Slack app with an Incoming Webhook and two slash commands, `/onboard` and `/offboard`
+- An S3 bucket for Terraform state (this project's backend expects it in `us-east-1`)
 
-### 1. Install Lambda dependencies
+### 1. Install Lambda dependencies (required before the first apply)
 
-```bash
-pip install -r lambda-package/requirements.txt \
-    -t lambda-package/ \
-    --platform manylinux2014_x86_64 \
-    --only-binary=:all:
+```powershell
+# Run from the project root (not terraform/), on one line or with backticks:
+pip install -r lambda-package/requirements.txt -t lambda-package/ `
+  --platform manylinux2014_x86_64 --python-version 3.11 --only-binary=:all: --upgrade
 ```
 
-> The Terraform `null_resource` handles this automatically on Linux. On Mac/Windows, run the command above manually before `terraform apply`.
+On macOS/Linux, use `\` instead of the backtick for line continuation. `--python-version 3.11` makes pip fetch packages for the Lambda runtime even if your local Python is a different version. Terraform's `pip_install` step repeats this on later applies, but `archive_file` is read at plan time, so on a clean checkout the first zip would otherwise be missing dependencies.
 
-### 2. Populate Secrets Manager
+### 2. Create `terraform/secrets.auto.tfvars`
 
-After `terraform apply`, populate the three LDAP secrets with values from your directory:
+The file is auto-loaded by Terraform and git-ignored. Never commit it.
 
-```bash
-# The AD DNS name is printed as the `ad_dns_name` Terraform output
-aws secretsmanager put-secret-value \
-    --secret-id ldap_server_address \
-    --secret-string "business.abc.com"
-
-aws secretsmanager put-secret-value \
-    --secret-id ldap_username \
-    --secret-string "svc-onboarding@business.abc.com"
-
-aws secretsmanager put-secret-value \
-    --secret-id ldap_password \
-    --secret-string "YourServiceAccountPassword"
+```hcl
+slack_webhook_url        = "https://hooks.slack.com/services/T000/B000/xxxxxxxx"
+slack_signing_secret     = "<Slack app → Basic Information → Signing Secret>"
+directory_admin_password = "<strong password; only needed when use_mock_ldap = \"false\">"
+use_mock_ldap            = "true"
 ```
 
-### 3. Deploy infrastructure
+### 3. Deploy
 
 ```bash
 cd terraform
-terraform init
+terraform init -backend-config="bucket=<your-tfstate-bucket>" -backend-config="region=us-east-1"
 terraform apply
 ```
 
-The `api_endpoint` output is the URL to send onboarding requests to.
+In mock mode the apply takes a few minutes. With a real directory, the first apply takes 20–45 minutes. Outputs include `api_endpoint`, `dashboard_url`, and (real directory only) `ad_dns_ip_addresses`.
 
-### 4. (Optional) Enable mock LDAP
+### 4. Point Slack at the API
 
-Set `USE_MOCK_LDAP=true` on the Lambda (or `use_mock_ldap = "true"` in your `.tfvars`) to run the full Claude pipeline without a real Active Directory. Every provisioning action that would have been taken is logged to CloudWatch instead of executed against LDAP. This is the recommended mode for demos and for reviewers who want to test the project without paying for AWS Managed Microsoft AD.
+Set the slash-command Request URLs to `<api_endpoint>/onboard` and `<api_endpoint>/offboard`, with no query string. Both routes are authenticated by the Slack signature.
 
-The `cd.yml` workflow sets `TF_VAR_use_mock_ldap: "true"` by default — flip it to `"false"` once real LDAP credentials are in Secrets Manager.
+### 5. Real directory only: populate the LDAP secrets
 
-### 5. Send an onboarding request
+Skip this in mock mode. With `use_mock_ldap = "false"`:
 
-The `/onboard` route is invoked from Slack and is authenticated by **Slack signing-secret HMAC** — there is no `x-api-key`. To call it directly you must send a valid `X-Slack-Signature` and `X-Slack-Request-Timestamp` computed from your `slack_signing_secret`; see `docs/DEMO_GUIDE.md` (section 4, Option C) for a ready-to-run signed request.
+```bash
+aws secretsmanager put-secret-value --secret-id ldap_server_address --secret-string "<one of the ad_dns_ip_addresses>"
+aws secretsmanager put-secret-value --secret-id ldap_username       --secret-string "svc-onboarding@business.abc.com"
+aws secretsmanager put-secret-value --secret-id ldap_password       --secret-string "<service account password>"
+```
 
-**Responses:**
-- `200` — accepted; "Working on it…" ack returned, result delivered to Slack
-- `202` — role/department too ambiguous, or department unstated, for auto-provisioning; IT alerted for manual review
-- `400` — Claude could not extract required fields from the request
-- `401` — missing or invalid Slack signature
-- `500` — LDAP or AWS service error
+Use a domain controller IP, not `business.abc.com`: the VPC uses AmazonProvidedDNS, which can't resolve the directory's domain.
+
+### Mock LDAP mode
+
+With `use_mock_ldap = "true"` (the default in `cd.yml` and in the example above), every provisioning action that would have been taken is logged to CloudWatch instead of executed against LDAP. Claude parsing, confidence gating, DynamoDB audit records and Slack notifications all run for real. This is how v1 is demoed.
+
+### Responses
+
+The HTTP response comes from `slack_dispatch_function` and only says whether the request was accepted:
+
+- `200` — signature valid; the worker was started and Slack shows "Working on it…"
+- `401` — missing or invalid Slack signature, or a timestamp more than 5 minutes old
+- `500` — the dispatcher couldn't invoke the worker
+
+The worker's outcome arrives in Slack a few seconds later through SNS: provisioned, sent to manual review (confidence below the threshold or department not stated), or failed (LDAP or AWS error). Each of those is also written to DynamoDB. Requests that fail validation (missing fields, characters not allowed in an LDAP DN) are rejected before any directory write, but today that rejection is silent after the ack: no Slack message and no audit record.
+
+### Tear down
+
+In mock mode, just run `terraform destroy`. If a real directory is deployed, it has `prevent_destroy = true`: delete that line from `aws_directory_service_directory.ad_directory` in `terraform/Infrastructure.tf` first. The S3 state bucket is not managed by Terraform and stays.
 
 ---
 
@@ -282,7 +308,7 @@ The app registration in Entra ID needs the `User.ReadWrite.All` application perm
 
 ## Offboarding
 
-`/offboard` works exactly like `/onboard`: a Slack slash command fronted by `slack_dispatch_function`, authenticated by **Slack signing-secret HMAC** (no `x-api-key`), with a 3-second ack and the work done asynchronously. In the Slack app set the **Request URL** to `<api_endpoint>/offboard` (no query string). To call it directly, send a valid `X-Slack-Signature` / `X-Slack-Request-Timestamp` — see `docs/DEMO_GUIDE.md` section 4, Option C, with `command=/offboard`.
+`/offboard` works exactly like `/onboard`: a Slack slash command fronted by `slack_dispatch_function`, authenticated by **Slack signing-secret HMAC**, with a 3-second ack and the work done asynchronously. In the Slack app set the **Request URL** to `<api_endpoint>/offboard` (no query string). To call it directly, send a valid `X-Slack-Signature` / `X-Slack-Request-Timestamp` — see `docs/DEMO_GUIDE.md` section 4, Option C, with `command=/offboard`.
 
 Claude extracts the username from the natural language request. The offboarding Lambda then disables the AD account (`userAccountControl=514`), removes the user from every group, optionally deprovisions in Entra ID, and logs the event to DynamoDB with status `Offboarded`.
 
@@ -292,35 +318,35 @@ Claude extracts the username from the natural language request. The offboarding 
 
 Two GitHub Actions workflows ship with the project.
 
-**`ci.yml`** runs on every push and every PR. It installs Python 3.11 with `boto3`, `ldap3`, and `pytest`, then runs the full test suite. All Bedrock calls are mocked — no AWS credentials are needed for CI.
+**`ci.yml`** runs on every push and every PR. It installs Python 3.11 with `boto3`, `ldap3`, `pytest` and `moto`, then runs the full suite: 65 tests, including end-to-end tests against moto-mocked AWS. Bedrock calls are mocked, so CI needs no AWS credentials.
 
-**`cd.yml`** runs after tests pass. On a PR to `main` it posts a `terraform plan` as a PR comment. On merge to `main` it runs `terraform apply`. It requires the following secrets configured in **Settings → Secrets and variables → Actions**:
+**`cd.yml`** runs the same tests first. On a PR to `main` it posts a `terraform plan` as a PR comment; on a push to `main` it runs `terraform apply`. State lives in the S3 backend configured in `terraform/provider.tf` (bucket passed at `init`, region `us-east-1`). It needs these repository secrets under **Settings → Secrets and variables → Actions**:
 
 | Secret | Description |
 |---|---|
 | `AWS_ACCESS_KEY_ID` | IAM user access key with permissions to deploy all resources |
 | `AWS_SECRET_ACCESS_KEY` | Corresponding secret key |
-| `TF_STATE_BUCKET` | S3 bucket name for Terraform remote state (create once before first apply) |
-| `DIRECTORY_ADMIN_PASSWORD` | Admin password for the AWS Managed Microsoft AD |
-| `ONBOARDING_API_KEY` | API key protecting the `/offboard` route (and any non-Slack callers) |
-| `SLACK_SIGNING_SECRET` | Slack app signing secret; `slack_dispatch_function` verifies `/onboard` requests against it |
+| `TF_STATE_BUCKET` | S3 bucket for Terraform remote state (in `us-east-1`; create once before the first apply) |
+| `DIRECTORY_ADMIN_PASSWORD` | Admin password for AWS Managed Microsoft AD |
+| `SLACK_SIGNING_SECRET` | Slack app signing secret; `slack_dispatch_function` verifies every request against it |
+| `SLACK_WEBHOOK_URL` | Slack incoming webhook URL used by `slack_notifier_function` |
 
-Before enabling the CD workflow, uncomment and configure the S3 backend in `terraform/provider.tf` so Terraform state is shared between runs rather than stored locally on the runner.
-
-Update the badge URLs at the top of this file by replacing `<your-org>/<your-repo>` with your GitHub repository path.
+`cd.yml` sets `TF_VAR_use_mock_ldap: "true"`. Flip it to `"false"` once real LDAP credentials are in Secrets Manager.
 
 ---
 
 ## Security
 
-- **Secrets Manager** — LDAP credentials never appear in environment variables or code
-- **VPC isolation** — the in-VPC Lambdas reach AWS services privately: Interface endpoints for Secrets Manager, SNS, Lambda, Bedrock Runtime, SQS, and SSM, plus a Gateway endpoint for DynamoDB. Traffic never leaves the AWS backbone. (Gateway-endpoint traffic targets the service's public prefix list, so the Lambda security group must allow egress to that prefix list — not just the VPC CIDR.)
-- **Least-privilege IAM** — Lambda role is scoped to specific resource ARNs throughout: Secrets Manager, DynamoDB, SNS, SSM, the notify Lambda function, and the Claude Haiku 4.5 inference profile + foundation-model ARN in Bedrock
-- **Request authentication** — the `/onboard` route is verified by Slack signing-secret HMAC (timestamp + `X-Slack-Signature`, 5-minute replay window) inside `slack_dispatch_function`; the `/offboard` route is verified the same way. The legacy `x-api-key` authorizer is no longer attached to a route. No shared secret is placed in the request URL
-- **API Gateway throttling** — burst limit of 10 req/s and sustained rate of 5 req/s protect downstream Bedrock and LDAP from runaway callers even with a valid key
+- **Secrets Manager and SSM SecureString** — LDAP, Entra ID and directory admin credentials live in Secrets Manager, and the Slack webhook URL is an SSM SecureString. None appear in environment variables or code.
+- **Slack request signing** — both routes verify Slack's signing-secret HMAC (`X-Slack-Signature` over the timestamp and raw body, 5-minute replay window) inside `slack_dispatch_function` before any work starts. There's no shared API key and nothing secret in the request URL.
+- **VPC isolation** — the in-VPC Lambdas reach AWS services privately: interface endpoints for Secrets Manager, SNS, Lambda, Bedrock Runtime and SSM, placed in both subnets/AZs, plus a gateway endpoint for DynamoDB. Traffic never leaves the AWS backbone. (Gateway-endpoint traffic targets the service's public prefix list, so the Lambda security group must allow egress to that prefix list, not just the VPC CIDR.)
+- **Encrypted notifications** — the SNS topic uses a customer-managed KMS key with rotation enabled. The key policy lets CloudWatch alarms publish to the encrypted topic, and the Lambda role gets only `kms:GenerateDataKey` and `kms:Decrypt` on that key.
+- **Least-privilege IAM** — the Lambda role is scoped to specific resource ARNs throughout: Secrets Manager, DynamoDB, SNS, KMS, SSM, the notify Lambda function, and the Claude Haiku 4.5 inference profile + foundation-model ARN in Bedrock
+- **API access logs** — API Gateway writes JSON access logs (request ID, route, status, integration status, source IP, user agent) to CloudWatch with 14-day retention
+- **API Gateway throttling** — burst limit of 10 req/s and sustained rate of 5 req/s protect downstream Bedrock and LDAP from runaway callers, including validly signed ones
 - **Confidence gating** — ambiguous requests are flagged for human review rather than auto-provisioned
 - **Audit trail** — every event (success, failure, pending review, offboarding) writes an immutable DynamoDB record with a UUID partition key; records include role, department, groups assigned/removed, and Claude's confidence score for full post-incident traceability
-- **DLQ + CloudWatch alarm on notification Lambda** — failed async invocations of `notify_sns_function` (after Lambda's built-in retries) are captured in an SQS dead-letter queue; a CloudWatch alarm fires within 60 seconds if any message lands there, alerting the IT SNS topic automatically
+- **DLQ + CloudWatch alarm on notification Lambda** — failed async invocations of `notify_sns_function` (after Lambda's built-in retries) are captured in an SQS dead-letter queue by the Lambda service; a CloudWatch alarm fires within 60 seconds if any message lands there, alerting the IT SNS topic automatically
 
 ---
 

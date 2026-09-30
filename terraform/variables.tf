@@ -4,11 +4,11 @@ variable "aws_region" {
   default     = "us-west-2"
 }
 
-variable "vpc_cidr_block" {
-  description = "CIDR block for the VPC"
-  type        = string
-  default     = "10.0.0.0/16"
-}
+## variable "vpc_cidr_block" {
+##  description = "CIDR block for the VPC"
+##  type        = string
+##  default     = "10.0.0.0/16"
+## }
 
 variable "lambda_runtime" {
   description = "Runtime for the Lambda function"
@@ -17,15 +17,10 @@ variable "lambda_runtime" {
 }
 
 variable "directory_admin_password" {
-  description = "Admin password for the AWS Managed Microsoft AD. Pass via -var flag or a .tfvars file — never commit this value."
+  description = "Admin password for the AWS Managed Microsoft AD. Only needed when use_mock_ldap is not \"true\" (mock mode creates no directory). Pass via a .tfvars file — never commit this value."
   type        = string
   sensitive   = true
-}
-
-variable "onboarding_api_key" {
-  description = "API key callers must supply in the x-api-key header to reach the offboarding endpoint (and any non-Slack onboarding callers)."
-  type        = string
-  sensitive   = true
+  default     = ""
 }
 
 variable "slack_signing_secret" {
@@ -37,7 +32,7 @@ variable "slack_signing_secret" {
 variable "use_mock_ldap" {
   description = "Set to \"true\" to skip real LDAP calls and log what would have been provisioned. Safe for demos and CI runs without an Active Directory."
   type        = string
-  default     = "false"
+  default     = "true"
 }
 
 variable "azure_sync_enabled" {
