@@ -102,7 +102,8 @@ Slack slash commands require an HTTP response within 3 seconds, but the onboardi
 
 The directory started as AWS Simple AD (about $36/month) and moved to AWS Managed Microsoft AD, Standard edition (roughly $88/month for the two domain controllers AWS runs across two AZs; check current pricing for your region). The reasons:
 
-- **LDAPS.** The Lambdas bind with `use_ssl=True`. Simple AD doesn't support LDAPS; Managed Microsoft AD does once a certificate is configured.
+- **Availability.** AWS has closed Simple AD to new customers and points new deployments to Managed Microsoft AD or AD Connector ([Simple AD availability changes](https://docs.aws.amazon.com/directoryservice/latest/admin-guide/simple-ad-availability-change.html)). Existing Simple AD customers keep full use, but a reviewer reproducing this stack in a fresh account couldn't create one.
+- **LDAPS.** The Lambdas bind with `use_ssl=True`. Managed Microsoft AD supports LDAPS once a certificate is configured.
 - **Real Active Directory behavior.** Managed Microsoft AD is actual Windows Server AD, so `userAccountControl`, group membership and password policy behave the way they would in a customer's environment instead of through Samba 4 emulation.
 - **Still fully managed.** AWS handles patching, backups and multi-AZ availability; there's no Windows Server to maintain.
 
@@ -203,9 +204,10 @@ Every event — onboarding, offboarding, pending review, or failure — writes o
 ├── docs/
 │   ├── DEMO_GUIDE.md          # Full runbook: setup → Slack → demo → troubleshooting → teardown
 │   ├── sample_requests.md     # Signed sample requests (happy path, manual review, bad input, injection)
+│   ├── GAME_DAY_TESTS.md      # Fault-injection tests: DLQ + alarm path, deploy integrity, fail-fast VPC deps
 │   ├── LEARNING_LESSONS.md    # Build notes and lessons learned
 │   ├── runbooks/DLQ-Runbook.md
-│   └── incidents/INC-2026-001-DLQ-FIRED.md
+│   └── incidents/             # Incident records (INC-2026-002: Simple AD create blocked → Managed AD)
 ├── demo.ps1                   # One-shot demo driver: plan → apply → signed request → dashboard URL
 ├── LICENSE
 └── README.md
